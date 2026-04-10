@@ -1,0 +1,10 @@
+.vscode
+
+# Datasets
+data/
+
+
+# Python cache
+__pycache__/
+.pytest_cache/
+*.egg-info/
