@@ -3,6 +3,15 @@
 # Datasets
 data/
 
+# .so
+*.so
+
+# Build
+build/
+_build/
+dist/
+.coverage
+.cache
 
 # Python cache
 __pycache__/

@@ -17,3 +17,24 @@ class BaseSpatialModule(nn.Module):
     def forward(self, x: Geometry):
         """Forward pass."""
         raise NotImplementedError
+
+
+class BaseSpatialModel(BaseSpatialModule):
+    """Base model class."""
+
+    def data_dict_to_input(self, data_dict, **kwargs) -> Any:
+        """Convert data dictionary to appropriate input for the model."""
+        raise NotImplementedError
+
+    def loss_dict(self, data_dict, **kwargs) -> Dict:
+        """Compute the loss dictionary for the model."""
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def eval_dict(self, data_dict, **kwargs) -> Dict:
+        """Compute the evaluation dictionary for the model."""
+        raise NotImplementedError
+
+    def image_pointcloud_dict(self, data_dict, datamodule) -> Tuple[Dict, Dict]:
+        """Compute the image dict and pointcloud dict for the model."""
+        raise NotImplementedError
