@@ -114,7 +114,6 @@ class TorchHashTable:
     def insert(
         self,
         vec_keys: Tensor,
-        threads_per_block: int = 256,
         storage_capacity: Optional[int] = None,
     ):
         """Insert vector keys (PyTorch Tensor) into the hash table.
@@ -256,7 +255,6 @@ class TorchHashTable:
     def search(
         self,
         search_keys: Union[Tensor, np.ndarray],
-        threads_per_block: int = 256,
         cooperative: bool = True,
     ) -> Tensor:
         """Search for keys (PyTorch Tensor) in the hash table.
