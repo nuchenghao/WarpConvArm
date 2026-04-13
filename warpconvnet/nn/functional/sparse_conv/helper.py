@@ -1,0 +1,529 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from enum import Enum
+from typing import List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+from jaxtyping import Float, Int
+
+from torch import Tensor
+
+from warpconvnet.geometry.base.geometry import Geometry
+from warpconvnet.geometry.types.voxels import Voxels
+from warpconvnet.geometry.coords.integer import IntCoords
+from warpconvnet.geometry.coords.ops.stride import stride_coords
+from warpconvnet.geometry.coords.search.cache import IntSearchCache, IntSearchCacheKey
+from warpconvnet.geometry.coords.search.search_results import IntSearchResult
+from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
+from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, encode
+from warpconvnet.nn.functional.sparse_pool import sparse_reduce
+from warpconvnet.utils.ntuple import ntuple
+
+# from warpconvnet.utils.logger import get_logger
+
+from .detail.unified import (
+    SPARSE_CONV_AB_ALGO_MODE,
+    SPARSE_CONV_ATB_ALGO_MODE,
+    UnifiedSpatiallySparseConvFunction,
+)
+
+# logger = get_logger(__name__)
+
+
+class STRIDED_CONV_MODE(Enum):
+    REDUCE_AND_STRIDE = "reduce_and_stride"  # Apply convolution on the pooled input. This increases the density of the input
+    STRIDE_ONLY = "stride_only"
+
+
+def _intcoords_from_batch_indexed(
+    reference: IntCoords,
+    batch_indexed_coords: Int[Tensor, "N D+1"],  # noqa: F821
+    offsets: Int[Tensor, "B+1"],  # noqa: F821
+) -> IntCoords:
+    """
+    Instantiate an IntCoords using metadata from a reference coordinate set.
+    """
+    offsets_cpu = offsets.to(device="cpu", dtype=reference.offsets.dtype)
+    return reference.__class__(
+        batch_indexed_coords[:, 1:],
+        offsets_cpu,
+        voxel_size=reference.voxel_size,
+        tensor_stride=reference.tensor_stride,
+        device=reference.batched_tensor.device,
+    )
+
+
+def _apply_generative_policy(
+    input_sparse_tensor: Voxels,
+    kernel_size: Tuple[int, ...],
+    kernel_dilation: Tuple[int, ...],
+    stride: Tuple[int, ...],
+    stride_mode: STRIDED_CONV_MODE,
+    transposed: bool,
+) -> Tuple[
+    Int[Tensor, "N D+1"], Int[Tensor, "B+1"], Int[Tensor, "N D+1"]
+]:  # noqa: F821
+    """
+    Resolve generative output coordinates using IntCoords primitives.
+
+    For non-transposed generative convolution:
+        - stride=1: expand input coordinates by kernel size
+        - stride>1: stride input coordinates first, then expand
+
+    For transposed generative convolution:
+        - stride=1: same as non-transposed (expand for densification)
+        - stride>1: scale input coordinates by stride (upsampling), then expand
+          This produces output at a finer resolution than input.
+
+    Returns:
+        batch_indexed_out_coords: Expanded coordinates with batch column.
+        out_offsets: Offsets for the expanded coordinates.
+        updated_batch_indexed_in_coords: Coordinates to use when building the kernel map.
+    """
+    input_coords = input_sparse_tensor.batched_coordinates
+    batch_indexed_in_coords = input_sparse_tensor.batch_indexed_coordinates
+
+    if all(s == 1 for s in stride):
+        # No stride change - just expand coordinates
+        expanded_coords = input_coords.expand(kernel_size, kernel_dilation)
+        return (
+            expanded_coords.batch_indexed_coordinates,
+            expanded_coords.offsets,
+            batch_indexed_in_coords,
+        )
+
+    if stride_mode not in (
+        STRIDED_CONV_MODE.STRIDE_ONLY,
+        STRIDED_CONV_MODE.REDUCE_AND_STRIDE,
+    ):
+        raise ValueError(
+            f"Unsupported stride_mode {stride_mode} for generative convolution"
+        )
+
+    if transposed:
+        # Transposed with stride > 1: upsampling + densification
+        # Scale input coordinates by stride to get finer resolution, then expand
+        num_spatial_dims = batch_indexed_in_coords.shape[1] - 1
+        stride_tensor = torch.tensor(
+            [1] + list(stride),
+            dtype=batch_indexed_in_coords.dtype,
+            device=batch_indexed_in_coords.device,
+        )
+        scaled_batch_indexed_coords = batch_indexed_in_coords * stride_tensor
+        scaled_coords = _intcoords_from_batch_indexed(
+            input_coords,
+            scaled_batch_indexed_coords,
+            input_sparse_tensor.offsets,
+        )
+        expanded_coords = scaled_coords.expand(kernel_size, kernel_dilation)
+        return (
+            expanded_coords.batch_indexed_coordinates,
+            expanded_coords.offsets,
+            scaled_batch_indexed_coords,
+        )
+
+    # Non-transposed with stride > 1: stride first, then expand
+    strided_batch_indexed_coords, strided_offsets = stride_coords(
+        batch_indexed_in_coords,
+        stride,
+    )
+    strided_coords = _intcoords_from_batch_indexed(
+        input_coords,
+        strided_batch_indexed_coords,
+        strided_offsets,
+    )
+    expanded_coords = strided_coords.expand(kernel_size, kernel_dilation)
+
+    if stride_mode == STRIDED_CONV_MODE.STRIDE_ONLY:
+        kernel_map_in_coords = batch_indexed_in_coords
+    else:  # REDUCE_AND_STRIDE
+        kernel_map_in_coords = strided_coords.batch_indexed_coordinates
+
+    return (
+        expanded_coords.batch_indexed_coordinates,
+        expanded_coords.offsets,
+        kernel_map_in_coords,
+    )
+
+
+def spatially_sparse_conv(
+    input_sparse_tensor: Geometry,
+    weight: Float[Tensor, "K C_in C_out"],
+    kernel_size: Union[int, List[int], Tuple[int, ...]],
+    stride: Union[int, List[int], Tuple[int, ...]] = 1,
+    kernel_dilation: Union[int, List[int], Tuple[int, ...]] = 1,
+    bias: Optional[Float[Tensor, "C_out"]] = None,  # noqa: F821
+    kernel_matmul_batch_size: int = 2,
+    generative: bool = False,
+    output_spatially_sparse_tensor: Optional[Geometry] = None,
+    transposed: bool = False,
+    fwd_algo: Union[
+        str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]
+    ] = SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
+    dgrad_algo: Union[
+        str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]
+    ] = SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
+    wgrad_algo: Union[
+        str, List[Union[str, SPARSE_CONV_ATB_ALGO_MODE]]
+    ] = SPARSE_CONV_ATB_ALGO_MODE.EXPLICIT_GEMM,
+    stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
+    stride_reduce: str = "max",
+    order: POINT_ORDERING = POINT_ORDERING.RANDOM,
+    compute_dtype: Optional[
+        torch.dtype
+    ] = None,  # Use None to default to in_features.dtype
+    implicit_matmul_fwd_block_size: Optional[
+        int
+    ] = 16,  # Default, can be None if not implicit
+    implicit_matmul_bwd_block_size: Optional[
+        int
+    ] = 16,  # Default, can be None if not implicit
+) -> Geometry:  # Should return Voxels or a base Geometry type compatible with Voxels
+    """
+    Perform spatially sparse convolution on the input tensor
+    Spatially sparse and feature sparse is not supported yet.
+
+    If stride is not 1, the kernel map will be generated by stride_mode.
+
+    If generative, the output coordinates will be expanded by (kernel size // 2) all directions.
+
+    For transposed convolution, the output coordinates should be provided along with the
+    output coordinate stride.
+    """
+    if not isinstance(input_sparse_tensor, Voxels):
+        raise TypeError(
+            f"Native spatially_sparse_conv expects input_sparse_tensor of type Voxels, got {type(input_sparse_tensor)}"
+        )
+
+    if output_spatially_sparse_tensor is not None and not isinstance(
+        output_spatially_sparse_tensor, Voxels
+    ):
+        raise TypeError(
+            f"Native spatially_sparse_conv expects output_spatially_sparse_tensor of type Voxels or None, got {type(output_spatially_sparse_tensor)}"
+        )
+
+    num_spatial_dims = input_sparse_tensor.num_spatial_dims
+    _kernel_size = ntuple(kernel_size, ndim=num_spatial_dims)
+    _kernel_dilation = ntuple(kernel_dilation, ndim=num_spatial_dims)
+    _stride = ntuple(stride, ndim=num_spatial_dims)
+
+    num_total_kernels = np.prod(_kernel_size)
+    if np.prod(_kernel_size) == 1 and np.prod(_stride) == 1:
+        out_feature_tensor = input_sparse_tensor.feature_tensor @ weight[0]
+        if bias is not None:
+            out_feature_tensor += bias
+        return input_sparse_tensor.replace(
+            batched_features=out_feature_tensor,
+        )
+
+    in_tensor_stride = input_sparse_tensor.tensor_stride
+    if in_tensor_stride is None:
+        in_tensor_stride = ntuple(1, ndim=num_spatial_dims)
+
+    if transposed and not generative:
+        assert (
+            output_spatially_sparse_tensor is not None
+        ), "Output spatially sparse tensor is required for transposed convolution without generative"
+
+    out_tensor_stride: Tuple[int, ...]
+    if not transposed:
+        out_tensor_stride = tuple(o * s for o, s in zip(_stride, in_tensor_stride))
+    elif transposed and generative:
+        # For transposed generative convolution:
+        # - stride=1: same resolution densification (expand coords, keep tensor stride)
+        # - stride>1: upsampling + densification (expand coords at finer resolution)
+        # Output tensor stride = input tensor stride / conv stride (upsampling)
+        out_tensor_stride = tuple(i // s for i, s in zip(in_tensor_stride, _stride))
+    else:  # transposed and not generative
+        if (
+            output_spatially_sparse_tensor is not None
+            and output_spatially_sparse_tensor.tensor_stride is not None
+        ):
+            out_tensor_stride = output_spatially_sparse_tensor.tensor_stride
+        else:
+            out_tensor_stride = ntuple(1, ndim=num_spatial_dims)
+        # At least one of the output stride dimensions should be smaller than the input stride dimensions
+        assert any(
+            o < i for o, i in zip(out_tensor_stride, in_tensor_stride)
+        ), "Output stride is larger than input stride"
+
+    # Determine effective compute_dtype
+    effective_compute_dtype = (
+        compute_dtype
+        if compute_dtype is not None
+        else input_sparse_tensor.feature_tensor.dtype
+    )
+
+    if stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and any(
+        s != 1 for s in _stride
+    ):
+        reduced_input_voxels = sparse_reduce(
+            input_sparse_tensor,
+            kernel_size=_stride,
+            stride=_stride,
+            reduction=stride_reduce,
+        )
+        current_input_features_for_gemm = reduced_input_voxels.feature_tensor
+        # The `kernel_map` indices (in_map) should refer to indices within `reduced_input_voxels`.
+        # `generate_kernel_map` (called by `generate_output_coords_and_kernel_map`) must ensure this mapping is correct
+        # when `stride_mode` is `REDUCE_AND_STRIDE`.
+        input_sparse_tensor = reduced_input_voxels
+        _stride = ntuple(1, ndim=num_spatial_dims)
+    else:
+        current_input_features_for_gemm = input_sparse_tensor.feature_tensor
+
+    batch_indexed_out_coords, out_offsets, kernel_map = (
+        generate_output_coords_and_kernel_map(
+            input_sparse_tensor=input_sparse_tensor,
+            kernel_size=_kernel_size,
+            kernel_dilation=_kernel_dilation,
+            stride=_stride,
+            generative=generative,
+            transposed=transposed,
+            output_spatially_sparse_tensor=output_spatially_sparse_tensor,
+            stride_mode=stride_mode,
+            order=order,
+        )
+    )
+    num_out_coords = batch_indexed_out_coords.shape[0]
+
+    out_feature_tensor = UnifiedSpatiallySparseConvFunction.apply(
+        current_input_features_for_gemm,
+        weight,
+        kernel_map,
+        num_out_coords,
+        fwd_algo,
+        dgrad_algo,
+        wgrad_algo,
+        effective_compute_dtype,
+        implicit_matmul_fwd_block_size,
+        implicit_matmul_bwd_block_size,
+        in_tensor_stride,
+    )
+
+    if bias is not None:
+        # Use non-in-place add to avoid "view modified inplace" error when
+        # the output is a view (e.g., from channel padding slice).
+        out_feature_tensor = out_feature_tensor + bias
+
+    out_offsets_cpu = out_offsets.cpu().int()
+    return input_sparse_tensor.replace(
+        batched_coordinates=IntCoords(
+            batch_indexed_out_coords[:, 1:],
+            offsets=out_offsets_cpu,
+        ),
+        batched_features=out_feature_tensor,
+        tensor_stride=out_tensor_stride,
+    )
+
+
+def generate_output_coords_and_kernel_map(
+    input_sparse_tensor: Voxels,  # Ensure this is Voxels
+    kernel_size: Tuple[int, ...],
+    kernel_dilation: Tuple[int, ...],
+    stride: Tuple[int, ...],
+    generative: bool = False,
+    transposed: bool = False,
+    output_spatially_sparse_tensor: Optional[Voxels] = None,
+    stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
+    order: POINT_ORDERING = POINT_ORDERING.RANDOM,
+    # Extra optional knobs accepted by tests; currently no-op in this implementation
+    kernel_search_batch_size: Optional[int] = None,
+    out_code_backend: Optional[str] = None,
+) -> Tuple[Tensor, Int[Tensor, "B+1"], IntSearchResult]:
+    """
+    Perform spatially sparse convolution on the input tensor
+    Spatially sparse and feature sparse is not supported yet.
+
+    If stride is not 1, the kernel map will be generated by stride_mode.
+
+    If generative, the output coordinates will be expanded by (kernel size // 2) all directions.
+
+    For transposed convolution, the output coordinates should be provided along with the
+    output coordinate stride.
+
+    Args:
+        skip_symmetric_kernel_map: If True, skip the symmetric parts of the kernel map
+            for odd-sized kernels (e.g., for 3x3x3 kernels, only use half of the kernel positions).
+    """
+    batch_indexed_in_coords = input_sparse_tensor.batch_indexed_coordinates
+    in_to_out_stride_ratio = stride
+
+    if input_sparse_tensor.coordinates.dtype not in (torch.int32, torch.int64):
+        assert (
+            input_sparse_tensor.voxel_size is not None
+        ), "Voxel size is required for non-integer coordinates"
+        # TODO(cchoy): Implement a voxel size aware coordinate mapping
+
+    # Out coords and offsets generation
+    if output_spatially_sparse_tensor is not None:
+        assert (
+            not generative
+        ), "Output spatially sparse tensor is not supported with generative convolution"
+        batch_indexed_out_coords = (
+            output_spatially_sparse_tensor.batch_indexed_coordinates
+        )
+        out_offsets = output_spatially_sparse_tensor.offsets
+    elif generative:
+        (
+            batch_indexed_out_coords,
+            out_offsets,
+            batch_indexed_in_coords,
+        ) = _apply_generative_policy(
+            input_sparse_tensor,
+            kernel_size=kernel_size,
+            kernel_dilation=kernel_dilation,
+            stride=stride,
+            stride_mode=stride_mode,
+            transposed=transposed,
+        )
+    elif any(s != 1 for s in stride):
+        batch_indexed_out_coords, out_offsets = stride_coords(
+            batch_indexed_in_coords,
+            stride,
+        )
+    elif all(s == 1 for s in stride):
+        batch_indexed_out_coords, out_offsets = (
+            batch_indexed_in_coords,
+            input_sparse_tensor.offsets,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported case. stride_mode: {stride_mode}, generative: {generative}, transposed: {transposed}"
+        )
+
+    # Order the output coordinates
+    if order != POINT_ORDERING.RANDOM:
+        code_result = encode(
+            grid_coord=batch_indexed_out_coords[:, 1:],
+            batch_offsets=out_offsets,
+            order=order,
+            return_perm=True,
+        )
+        batch_indexed_out_coords = batch_indexed_out_coords[code_result.perm]
+
+    # if input_sparse_tensor.cache is not None, check the cache first
+    kernel_map_cache_key = IntSearchCacheKey(
+        kernel_size=kernel_size,
+        kernel_dilation=kernel_dilation,
+        transposed=transposed,
+        generative=generative,
+        stride_mode=str(stride_mode),
+        skip_symmetric_kernel_map=False,
+        in_offsets=input_sparse_tensor.offsets,
+        out_offsets=out_offsets,
+    )
+    if input_sparse_tensor.cache is not None:
+        kernel_map = input_sparse_tensor.cache.get(kernel_map_cache_key)
+        if kernel_map is not None:
+            return batch_indexed_out_coords, out_offsets, kernel_map
+
+    # Kernel map generation
+    if transposed and not generative:
+        # Look for the forward (non-transposed) kernel map to reverse.
+        # The forward kernel map has in_offsets=out_offsets (higher-res) and
+        # out_offsets=input.offsets (lower-res). It may be cached on:
+        #   1. input_sparse_tensor.cache (decoder features)
+        #   2. output_spatially_sparse_tensor.cache (encoder skip connection)
+        # The encoder's forward conv stored it on the encoder input's cache,
+        # which propagates to the output via replace(). So checking the
+        # output_spatially_sparse_tensor's cache is the most reliable path.
+        kernel_map_cache_key_non_transposed = IntSearchCacheKey(
+            kernel_size=kernel_size,
+            kernel_dilation=kernel_dilation,
+            transposed=False,
+            generative=generative,
+            stride_mode=str(stride_mode),
+            skip_symmetric_kernel_map=False,
+            in_offsets=out_offsets,
+            out_offsets=input_sparse_tensor.offsets,
+        )
+        kernel_map_non_transposed = None
+        # Check caches in order: input, then output_spatially_sparse_tensor
+        for cache_source in [input_sparse_tensor, output_spatially_sparse_tensor]:
+            if cache_source is not None and cache_source.cache is not None:
+                kernel_map_non_transposed = cache_source.cache.get(
+                    kernel_map_cache_key_non_transposed
+                )
+                if kernel_map_non_transposed is not None:
+                    break
+        if kernel_map_non_transposed is not None:
+            # Swap in and out maps for transposed kernel map
+            kernel_map = IntSearchResult(
+                in_maps=kernel_map_non_transposed.out_maps,
+                out_maps=kernel_map_non_transposed.in_maps,
+                offsets=kernel_map_non_transposed.offsets,
+            )
+            return batch_indexed_out_coords, out_offsets, kernel_map
+
+        # Swap in and out maps for transposed kernel map generation and swap it back
+        kernel_map = generate_kernel_map(
+            batch_indexed_out_coords,
+            batch_indexed_in_coords,
+            in_to_out_stride_ratio,
+            kernel_size,
+            kernel_dilation,
+            skip_symmetric_kernel_map=False,
+        )
+        kernel_map = IntSearchResult(
+            in_maps=kernel_map.out_maps,
+            out_maps=kernel_map.in_maps,
+            offsets=kernel_map.offsets,
+        )
+    elif transposed and generative:
+        # Transposed generative convolution: expand input coords to get output coords,
+        # then generate kernel map with swapped in/out (transposed semantics).
+        # For transposed conv, we generate the kernel map from out->in and then swap.
+        kernel_map = generate_kernel_map(
+            batch_indexed_out_coords,
+            batch_indexed_in_coords,
+            ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
+            kernel_size,
+            kernel_dilation,
+            skip_symmetric_kernel_map=False,
+        )
+        kernel_map = IntSearchResult(
+            in_maps=kernel_map.out_maps,
+            out_maps=kernel_map.in_maps,
+            offsets=kernel_map.offsets,
+        )
+    elif stride_mode == STRIDED_CONV_MODE.STRIDE_ONLY:
+        kernel_map = generate_kernel_map(
+            batch_indexed_in_coords,
+            batch_indexed_out_coords,
+            in_to_out_stride_ratio,
+            kernel_size,
+            kernel_dilation,
+            skip_symmetric_kernel_map=False,
+        )
+    elif stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and not generative:
+        # Compute mapping from output to output since it will be reduced
+        kernel_map = generate_kernel_map(
+            batch_indexed_out_coords,
+            batch_indexed_out_coords,
+            ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
+            kernel_size,
+            kernel_dilation,
+            skip_symmetric_kernel_map=False,
+        )
+    elif stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and generative:
+        kernel_map = generate_kernel_map(
+            batch_indexed_in_coords,
+            batch_indexed_out_coords,
+            ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
+            kernel_size,
+            kernel_dilation,
+            skip_symmetric_kernel_map=False,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported case. stride_mode: {stride_mode}, generative: {generative}, transposed: {transposed}"
+        )
+
+    if input_sparse_tensor.cache is None:
+        input_sparse_tensor._extra_attributes["_cache"] = IntSearchCache()
+
+    input_sparse_tensor.cache.put(kernel_map_cache_key, kernel_map)
+    return batch_indexed_out_coords, out_offsets, kernel_map

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, Union, Optional
 
@@ -159,7 +162,7 @@ class Geometry:
 
     @property
     @amp_aware_dtype
-    def padded_features(self) -> "PadFeatures":  # noqa: F821
+    def padded_features(self) -> "PadFeatures":
         """
         Explicitly convert batched features to padded features if necessary
         """

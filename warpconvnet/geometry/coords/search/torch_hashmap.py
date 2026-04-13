@@ -66,14 +66,14 @@ class TorchHashTable:
         self,
         capacity: int,
         hash_method: HashMethod = HashMethod.CITY,
-        device: Union[str, torch.device] = "cuda",
+        device: Union[str, torch.device] = "cpu",
     ):
         """Initialize the hash table using PyTorch tensors.
 
         Args:
             capacity: Maximum number of entries the table can store (number of slots)
             hash_method: HashMethod enum value (default: CITY)
-            device: The torch device to allocate tensors on (e.g., 'cuda', 'cuda:0').
+            device: The torch device to allocate tensors on (e.g., 'cpu', 'cuda', 'cuda:0').
         """
         if not isinstance(hash_method, HashMethod):
             raise TypeError(
@@ -195,7 +195,7 @@ class TorchHashTable:
         cls,
         vec_keys: Union[Tensor, np.ndarray],
         hash_method: HashMethod = HashMethod.CITY,
-        device: Union[str, torch.device] = "cuda",
+        device: Union[str, torch.device] = "cpu",
         capacity: Optional[int] = None,
         vector_capacity: Optional[int] = None,
     ):

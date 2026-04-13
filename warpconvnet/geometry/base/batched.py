@@ -20,14 +20,12 @@ class BatchedTensor:
         offsets (Int[Tensor, "B + 1"]): Indices marking the start/end of each tensor in the batch
     """
 
-    batched_tensor: Float[Tensor, "N C"]  # noqa: F722,F821
-    offsets: Int[Tensor, "B + 1"]  # noqa: F722,F821
+    batched_tensor: Float[Tensor, "N C"]
+    offsets: Int[Tensor, "B + 1"]
 
     def __init__(
         self,
-        batched_tensor: (
-            List[Float[Tensor, "N C"]] | Float[Tensor, "N C"]
-        ),  # noqa: F722,F821
+        batched_tensor: List[Float[Tensor, "N C"]] | Float[Tensor, "N C"],
         offsets: Optional[List[int] | Tensor] = None,
         device: Optional[str] = None,
     ):

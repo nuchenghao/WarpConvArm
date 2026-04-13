@@ -17,7 +17,7 @@ class CatFeatures(Features):
     def is_cat(self) -> bool:
         return True
 
-    def to_pad(self, pad_multiple: Optional[int] = None) -> "PadFeatures":  # noqa: F821
+    def to_pad(self, pad_multiple: Optional[int] = None) -> "PadFeatures":
         return cat_to_pad(self, pad_multiple=pad_multiple)
 
     def equal_shape(self, value: object) -> bool:
