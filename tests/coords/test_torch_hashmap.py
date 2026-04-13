@@ -40,6 +40,7 @@ def test_torch_hash_table_creation_and_search(device, sample_keys_torch, hash_me
     assert table.key_dim == sample_keys_torch.shape[1]
 
     # Search for existing keys
+
     results = table.search(sample_keys_torch)
     assert results.device == torch.device(device)
     assert (

@@ -17,7 +17,7 @@ cmdclass = {}
 
 if _HAS_TORCH:
     include_dirs = [
-        os.path.join(workspace_dir, "warpconvnet/csrc"),
+        os.path.join(workspace_dir, "warpconvnet/csrc/include"),
     ]
 
     cxx_args = ["-std=c++20", "-O3"]

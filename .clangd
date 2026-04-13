@@ -5,3 +5,4 @@ CompileFlags:
     - -I/Users/nuch/miniforge3/lib/python3.13/site-packages/torch/include
     - -I/Users/nuch/miniforge3/lib/python3.13/site-packages/torch/include/torch/csrc/api/include
     - -I/Users/nuch/miniforge3/include/python3.13
+    - -I/Users/nuch/workspace/WarpConvArm/warpconvnet/csrc/include

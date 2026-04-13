@@ -2,7 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
 
-#include "bindings/register.h"
+#include "register.h"
 
 PYBIND11_MODULE(_C, m) {
     m.doc() = "CUDA kernels exposed through PyBind11";
