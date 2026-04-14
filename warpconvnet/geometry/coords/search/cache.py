@@ -9,7 +9,6 @@ from warpconvnet.geometry.coords.search.utils import _int_tensor_hash
 
 from warpconvnet.geometry.coords.search.search_results import (
     IntSearchResult,
-    RealSearchResult,
 )
 
 from warpconvnet.geometry.coords.search.torch_discrete import (

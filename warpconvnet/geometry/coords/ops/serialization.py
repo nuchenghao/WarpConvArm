@@ -93,7 +93,7 @@ def morton_code(
         return torch.empty(0, dtype=torch.int64)
 
     min_coord = coords.min(0).values
-    coords_normalized = (coords - min_coord).to(dtype=torch.int32).cuda()
+    coords_normalized = (coords - min_coord).to(dtype=torch.int32)
 
     # Apply coordinate transformation based on ordering
     perm = POINT_ORDERING_TO_MORTON_PERMUTATIONS[order]

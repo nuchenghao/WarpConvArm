@@ -46,20 +46,20 @@ def batch_index_from_indices(
     assert isinstance(offsets, torch.Tensor), "offsets must be a torch.Tensor"
 
     _dev = device
-    if _dev is None:
-        if indices.is_cuda:
-            _dev = str(indices.device)
-        elif offsets.is_cuda:
-            _dev = str(offsets.device)
-        else:
-            raise ValueError(
-                "At least one tensor must be on CUDA if device is not specified."
-            )
+    # if _dev is None:
+    #     if indices.is_cuda:
+    #         _dev = str(indices.device)
+    #     elif offsets.is_cuda:
+    #         _dev = str(offsets.device)
+    #     else:
+    #         raise ValueError(
+    #             "At least one tensor must be on CUDA if device is not specified."
+    #         )
 
-    if not indices.is_cuda or str(indices.device) != _dev:
-        indices = indices.to(_dev)
-    if not offsets.is_cuda or str(offsets.device) != _dev:
-        offsets = offsets.to(_dev)
+    # if not indices.is_cuda or str(indices.device) != _dev:
+    #     indices = indices.to(_dev)
+    # if not offsets.is_cuda or str(offsets.device) != _dev:
+    #     offsets = offsets.to(_dev)
 
     indices = indices.contiguous().int()
     offsets = offsets.contiguous().int()

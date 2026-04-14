@@ -11,6 +11,13 @@ void coords_hashmap_warp_search(torch::Tensor table_kvs, torch::Tensor vector_ke
 void coords_hashmap_search(torch::Tensor table_kvs, torch::Tensor vector_keys,
                            torch::Tensor search_keys, torch::Tensor results, int num_search,
                            int key_dim, int capacity, int hash_method);
+void coords_kernel_map_offset(torch::Tensor table_kvs, torch::Tensor vector_keys,
+                              torch::Tensor query_coords, torch::Tensor kernel_offsets,
+                              torch::Tensor output, int num_query, int key_dim, int num_offsets,
+                              int capacity, int hash_method, int threads_x, int threads_y);
+void coords_map_found_indices_to_maps(torch::Tensor found, torch::Tensor mapped,
+                                      torch::Tensor offsets, torch::Tensor in_maps,
+                                      torch::Tensor out_maps, int K, int M);
 
 namespace warpconvnet {
 namespace bindings {
@@ -33,6 +40,18 @@ void register_coords(py::module_& m) {
                pybind11::arg("vector_keys"), pybind11::arg("search_keys"), pybind11::arg("results"),
                pybind11::arg("num_search"), pybind11::arg("key_dim"), pybind11::arg("capacity"),
                pybind11::arg("hash_method"));
+
+    // Torch discrete search
+    coords.def("kernel_map_offset", &coords_kernel_map_offset, pybind11::arg("table_kvs"),
+               pybind11::arg("vector_keys"), pybind11::arg("query_coords"),
+               pybind11::arg("kernel_offsets"), pybind11::arg("output"), pybind11::arg("num_query"),
+               pybind11::arg("key_dim"), pybind11::arg("num_offsets"), pybind11::arg("capacity"),
+               pybind11::arg("hash_method"), pybind11::arg("threads_x") = 64,
+               pybind11::arg("threads_y") = 8);
+    coords.def("map_found_indices_to_maps", &coords_map_found_indices_to_maps,
+               pybind11::arg("found"), pybind11::arg("mapped"), pybind11::arg("offsets"),
+               pybind11::arg("in_maps"), pybind11::arg("out_maps"), pybind11::arg("K"),
+               pybind11::arg("M"));
 }
 }  // namespace bindings
 }  // namespace warpconvnet

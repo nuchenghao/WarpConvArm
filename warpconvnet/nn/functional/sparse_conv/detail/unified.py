@@ -10,10 +10,9 @@ from torch.autograd import Function
 import warpconvnet._C as _C
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 
-from warpconvnet.utils.benchmark_cache import (
-    SpatiallySparseConvConfig,
-    generic_benchmark_update_entry,
-)
+# from warpconvnet.utils.benchmark_cache import (
+#     SpatiallySparseConvConfig,
+# )
 from warpconvnet.utils.ntuple import _pad_tuple
 from warpconvnet.utils.logger import get_logger
 
@@ -21,48 +20,14 @@ from .dispatch import _execute_forward, _execute_backward
 from .algo_params import (
     SPARSE_CONV_AB_ALGO_MODE,
     SPARSE_CONV_ATB_ALGO_MODE,
-    _HAS_CUTE_BACKEND,
-    _HAS_CUTE_GROUPED,
-    _HAS_CUTE_SM90,
-    _HAS_CUTE_GROUPED_SM90,
-    _ATB_PARAMS_AUTO,
     _get_adaptive_AB_params,
-    _get_adaptive_AtB_params,
-    _get_trimmed_AB_params,
-    _get_trimmed_AtB_params,
     _filter_benchmark_params_by_env_config,
 )
+
+
 from .autotune import (
-    _BENCHMARK_AB_RESULTS,
-    _BENCHMARK_ATB_RESULTS,
-    _serialize_benchmark_results,
     _run_forward_benchmarks,
-    _run_backward_benchmarks,
 )
-
-if _HAS_CUTE_BACKEND:
-    from .cute import (
-        _cute_implicit_gemm_forward_logic,
-        _cute_implicit_gemm_backward_logic,
-    )
-
-if _HAS_CUTE_GROUPED:
-    from .cute_grouped import (
-        _cute_grouped_forward_logic,
-        _cute_grouped_backward_logic,
-    )
-
-if _HAS_CUTE_SM90:
-    from .cute_sm90 import (
-        _cute_implicit_gemm_sm90_forward_logic,
-        _cute_implicit_gemm_sm90_backward_logic,
-    )
-
-if _HAS_CUTE_GROUPED_SM90:
-    from .cute_grouped_sm90 import (
-        _cute_grouped_sm90_forward_logic,
-        _cute_grouped_sm90_backward_logic,
-    )
 
 logger = get_logger(__name__)
 
@@ -112,33 +77,34 @@ class UnifiedSpatiallySparseConvFunction(Function):
         C_in = in_features.shape[1]
         C_out = weight.shape[2]
         kv = weight.shape[0]
-        if algorithm_filter == "trimmed":
-            adaptive_fwd_params = _get_trimmed_AB_params(
-                C_in,
-                C_out,
-                kv,
-                num_in_coords=in_features.shape[0],
-            )
-        else:
-            adaptive_fwd_params = _get_adaptive_AB_params(
-                C_in,
-                C_out,
-                kv,
-                num_in_coords=in_features.shape[0],
-                voxel_size=voxel_size,
-            )
 
-        config = SpatiallySparseConvConfig(
-            num_in_coords=in_features.shape[0],
-            num_out_coords=num_out_coords,
-            in_channels=C_in,
-            out_channels=C_out,
-            kernel_volume=kv,
-            in_dtype=in_features.dtype,
-        )
+        # if algorithm_filter == "trimmed":
+        #     adaptive_fwd_params = _get_trimmed_AB_params(
+        #         C_in,
+        #         C_out,
+        #         kv,
+        #         num_in_coords=in_features.shape[0],
+        #     )
+        # else:
+        #     adaptive_fwd_params = _get_adaptive_AB_params(
+        #         C_in,
+        #         C_out,
+        #         kv,
+        #         num_in_coords=in_features.shape[0],
+        #         voxel_size=voxel_size,
+        #     )
+
+        # config = SpatiallySparseConvConfig(
+        #     num_in_coords=in_features.shape[0],
+        #     num_out_coords=num_out_coords,
+        #     in_channels=C_in,
+        #     out_channels=C_out,
+        #     kernel_volume=kv,
+        #     in_dtype=in_features.dtype,
+        # )
 
         # Step 3: Check cache first
-        cached_result = _BENCHMARK_AB_RESULTS.get(config)
+        cached_result = None  # _BENCHMARK_AB_RESULTS.get(config)
         if cached_result is not None:
             # Support tuple (best) or list-of-tuples (best-first)
             if isinstance(cached_result, tuple):
@@ -187,35 +153,40 @@ class UnifiedSpatiallySparseConvFunction(Function):
                         )
         else:
             # Step 4: No cache - always benchmark within filtered space
-            if algorithm_filter in ("auto", "all", "trimmed"):
-                # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
-                filtered_params = _filter_benchmark_params_by_env_config(
-                    adaptive_fwd_params, algorithm_filter, is_forward=True
-                )
-            else:
-                # Filter benchmark parameters to only include algorithms in filter set
-                filtered_params = _filter_benchmark_params_by_env_config(
-                    adaptive_fwd_params, algorithm_filter, is_forward=True
-                )
+            # if algorithm_filter in ("auto", "all", "trimmed"):
+            #     # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
+            #     filtered_params = _filter_benchmark_params_by_env_config(
+            #         adaptive_fwd_params, algorithm_filter, is_forward=True
+            #     )
+            # else:
+            #     # Filter benchmark parameters to only include algorithms in filter set
+            #     filtered_params = _filter_benchmark_params_by_env_config(
+            #         adaptive_fwd_params, algorithm_filter, is_forward=True
+            #     )
 
-            # Always run benchmarks to find optimal parameters
-            all_fwd_benchmark_results = _run_forward_benchmarks(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                custom_params=filtered_params,
-            )
-            _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
-            # Persist a serialized copy to generic cache
-            generic_benchmark_update_entry(
-                "AB_gather_scatter",
-                config,
-                _serialize_benchmark_results(all_fwd_benchmark_results),
-                force=False,
-            )
-            chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
+            # # Always run benchmarks to find optimal parameters
+            # all_fwd_benchmark_results = _run_forward_benchmarks(
+            #     in_features,
+            #     weight,
+            #     kernel_map,
+            #     num_out_coords,
+            #     compute_dtype,
+            #     custom_params=filtered_params,
+            # )
+            # _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
+            # # Persist a serialized copy to generic cache
+            # generic_benchmark_update_entry(
+            #     "AB_gather_scatter",
+            #     config,
+            #     _serialize_benchmark_results(all_fwd_benchmark_results),
+            #     force=False,
+            # )
+            # chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
+
+            chosen_fwd_algo, chosen_fwd_params = "mask_implicit_gemm", {
+                "block_size": 16,
+                "mma_tile": 3,
+            }
 
         # Step 5: Pre-cast weight once (avoids per-algorithm re-casting)
         if compute_dtype is not None:
@@ -248,17 +219,17 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 f"Falling back to explicit_gemm."
             )
             # Invalidate the cached result for this config
-            _BENCHMARK_AB_RESULTS.pop(config, None)
-            output_feature_tensor = _execute_forward(
-                "explicit_gemm",
-                {},
-                in_features,
-                _weight_cast,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                fwd_block_size,
-            )
+            # _BENCHMARK_AB_RESULTS.pop(config, None)
+            # output_feature_tensor = _execute_forward(
+            #     "explicit_gemm",
+            #     {},
+            #     in_features,
+            #     _weight_cast,
+            #     kernel_map,
+            #     num_out_coords,
+            #     compute_dtype,
+            #     fwd_block_size,
+            # )
 
         # Save backward state when any input requires gradients.
         # Note: torch.is_grad_enabled() is False inside Function.forward()

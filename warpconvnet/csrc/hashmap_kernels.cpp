@@ -1,4 +1,4 @@
-#include "coords_common.h"
+#include "coords.h"
 
 void hashmap_prepare(int* table_kvs, int capacity) {
     parallel_for(static_cast<std::size_t>(capacity), [&](std::size_t idx) {

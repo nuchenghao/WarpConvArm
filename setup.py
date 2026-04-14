@@ -33,8 +33,11 @@ if _HAS_TORCH:
             sources=[
                 "warpconvnet/csrc/warpconvnet_pybind.cpp",
                 "warpconvnet/csrc/hashmap_kernels.cpp",
+                "warpconvnet/csrc/discrete_kernels.cpp",
                 "warpconvnet/csrc/coords_launch.cpp",
                 "warpconvnet/csrc/bindings/coords_bindings.cpp",
+                "warpconvnet/csrc/bindings/gemm_bindings.cpp",
+                "warpconvnet/csrc/mask_gemm_kernels.cpp",
             ],
             include_dirs=include_dirs,
             extra_compile_args={"cxx": cxx_args},

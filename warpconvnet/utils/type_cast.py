@@ -2,6 +2,17 @@ from typing import Optional
 
 import torch
 
+# Type casting order.
+TYPE_ORDER = [torch.bfloat16, torch.float16, torch.float32, torch.float64]
+
+
+def _min_dtype(*dtypes):
+    dtypes = [
+        dtype.dtype if isinstance(dtype, torch.Tensor) else dtype for dtype in dtypes
+    ]
+    assert all(dtype in TYPE_ORDER for dtype in dtypes), f"Invalid dtype: {dtypes}"
+    return TYPE_ORDER[min(TYPE_ORDER.index(dtype) for dtype in dtypes)]
+
 
 def _maybe_cast(
     tensor: torch.Tensor, dtype: Optional[torch.dtype] = None

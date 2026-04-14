@@ -6,11 +6,14 @@ from warpconvnet.geometry.types.voxels import (
     Voxels,
 )
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
-from warpconvnet.ops.reductions import REDUCTIONS
+from warpconvnet.ops.reductions import REDUCTIONS, row_reduction
 from warpconvnet.geometry.coords.integer import IntCoords
 from warpconvnet.utils.ntuple import ntuple
 from warpconvnet.geometry.coords.ops.stride import stride_coords
 from warpconvnet.geometry.coords.search.cache import IntSearchCache, IntSearchCacheKey
+from warpconvnet.geometry.coords.search.torch_discrete import (
+    generate_kernel_map,
+)
 
 
 def sparse_reduce(
@@ -106,3 +109,14 @@ def sparse_reduce(
         batched_features=out_features,
         stride=out_tensor_stride,
     )
+
+
+def sparse_max_pool(
+    voxels: Voxels,
+    kernel_size: Union[int, Tuple[int, ...]],
+    stride: Optional[Union[int, Tuple[int, ...]]] = None,
+) -> Voxels:
+    """
+    Max pooling for spatially sparse tensors.
+    """
+    return sparse_reduce(voxels, kernel_size, stride, reduction=REDUCTIONS.MAX)

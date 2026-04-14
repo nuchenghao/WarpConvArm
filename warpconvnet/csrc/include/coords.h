@@ -52,9 +52,7 @@ inline int capacity_reduce(uint32_t hash_val, int capacity) {
     return static_cast<int>(hash_val & static_cast<uint32_t>(capacity - 1));
 }
 
-inline int next_slot(int slot, int capacity) {
-    return (slot + 1) & (capacity - 1);
-}
+inline int next_slot(int slot, int capacity) { return (slot + 1) & (capacity - 1); }
 
 // --- Hash function structs for compile-time dispatch ---
 
@@ -156,8 +154,8 @@ template <typename HashFuncT>
 void search_keys_impl(const int* table_kvs, const int* vector_keys, const int* search_keys,
                       int* results, int num_search, int key_dim, int capacity) {
     parallel_for(static_cast<std::size_t>(num_search), [&](std::size_t idx) {
-        results[idx] = search_one_key<HashFuncT>(
-            table_kvs, vector_keys, &search_keys[idx * key_dim], key_dim, capacity);
+        results[idx] = search_one_key<HashFuncT>(table_kvs, vector_keys,
+                                                 &search_keys[idx * key_dim], key_dim, capacity);
     });
 }
 
@@ -203,29 +201,94 @@ void warp_search_keys_impl(const int* table_kvs, const int* vector_keys, const i
 inline void hashmap_insert(int* table_kvs, const int* vector_keys, int num_keys, int key_dim,
                            int capacity, int hash_method) {
     switch (hash_method) {
-        case 0: insert_keys_impl<FNV1AHash>(table_kvs, vector_keys, num_keys, key_dim, capacity); break;
-        case 1: insert_keys_impl<CityHash>(table_kvs, vector_keys, num_keys, key_dim, capacity); break;
-        case 2: insert_keys_impl<MurmurHash>(table_kvs, vector_keys, num_keys, key_dim, capacity); break;
-        default: TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+        case 0:
+            insert_keys_impl<FNV1AHash>(table_kvs, vector_keys, num_keys, key_dim, capacity);
+            break;
+        case 1:
+            insert_keys_impl<CityHash>(table_kvs, vector_keys, num_keys, key_dim, capacity);
+            break;
+        case 2:
+            insert_keys_impl<MurmurHash>(table_kvs, vector_keys, num_keys, key_dim, capacity);
+            break;
+        default:
+            TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
     }
 }
 
 inline void hashmap_search(const int* table_kvs, const int* vector_keys, const int* search_keys,
-                           int* results, int num_search, int key_dim, int capacity, int hash_method) {
+                           int* results, int num_search, int key_dim, int capacity,
+                           int hash_method) {
     switch (hash_method) {
-        case 0: search_keys_impl<FNV1AHash>(table_kvs, vector_keys, search_keys, results, num_search, key_dim, capacity); break;
-        case 1: search_keys_impl<CityHash>(table_kvs, vector_keys, search_keys, results, num_search, key_dim, capacity); break;
-        case 2: search_keys_impl<MurmurHash>(table_kvs, vector_keys, search_keys, results, num_search, key_dim, capacity); break;
-        default: TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+        case 0:
+            search_keys_impl<FNV1AHash>(table_kvs, vector_keys, search_keys, results, num_search,
+                                        key_dim, capacity);
+            break;
+        case 1:
+            search_keys_impl<CityHash>(table_kvs, vector_keys, search_keys, results, num_search,
+                                       key_dim, capacity);
+            break;
+        case 2:
+            search_keys_impl<MurmurHash>(table_kvs, vector_keys, search_keys, results, num_search,
+                                         key_dim, capacity);
+            break;
+        default:
+            TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
     }
 }
 
-inline void hashmap_warp_search(const int* table_kvs, const int* vector_keys, const int* search_keys,
-                                int* results, int num_search, int key_dim, int capacity, int hash_method) {
+inline void hashmap_warp_search(const int* table_kvs, const int* vector_keys,
+                                const int* search_keys, int* results, int num_search, int key_dim,
+                                int capacity, int hash_method) {
     switch (hash_method) {
-        case 0: warp_search_keys_impl<FNV1AHash>(table_kvs, vector_keys, search_keys, results, num_search, key_dim, capacity); break;
-        case 1: warp_search_keys_impl<CityHash>(table_kvs, vector_keys, search_keys, results, num_search, key_dim, capacity); break;
-        case 2: warp_search_keys_impl<MurmurHash>(table_kvs, vector_keys, search_keys, results, num_search, key_dim, capacity); break;
-        default: TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+        case 0:
+            warp_search_keys_impl<FNV1AHash>(table_kvs, vector_keys, search_keys, results,
+                                             num_search, key_dim, capacity);
+            break;
+        case 1:
+            warp_search_keys_impl<CityHash>(table_kvs, vector_keys, search_keys, results,
+                                            num_search, key_dim, capacity);
+            break;
+        case 2:
+            warp_search_keys_impl<MurmurHash>(table_kvs, vector_keys, search_keys, results,
+                                              num_search, key_dim, capacity);
+            break;
+        default:
+            TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
     }
 }
+
+// ============ torch discrete search ========================
+
+inline int hash_key(const int* key, int key_dim, int capacity, int hash_method) {
+    switch (hash_method) {
+        case 0:
+            return FNV1AHash::hash(key, key_dim, capacity);
+        case 1:
+            return CityHash::hash(key, key_dim, capacity);
+        case 2:
+            return MurmurHash::hash(key, key_dim, capacity);
+        default:
+            TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+    }
+}
+
+inline int search_hash_table(const int* table_kvs, const int* vector_keys, const int* query_key,
+                             int key_dim, int capacity, int hash_method) {
+    switch (hash_method) {
+        case 0:
+            return search_one_key<FNV1AHash>(table_kvs, vector_keys, query_key, key_dim, capacity);
+        case 1:
+            return search_one_key<CityHash>(table_kvs, vector_keys, query_key, key_dim, capacity);
+        case 2:
+            return search_one_key<MurmurHash>(table_kvs, vector_keys, query_key, key_dim, capacity);
+        default:
+            TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+    }
+}
+
+void kernel_map_offset(const int* table_kvs, const int* vector_keys, const int* query_coords,
+                       const int* kernel_offsets, int* found_in_coord_index, int num_query,
+                       int key_dim, int num_offsets, int capacity, int hash_method);
+void map_found_indices_to_maps(const int* found_in_coord_index, const int* mapped_indices,
+                               const int* offsets, int* out_in_maps, int* out_out_maps, int K,
+                               int M);

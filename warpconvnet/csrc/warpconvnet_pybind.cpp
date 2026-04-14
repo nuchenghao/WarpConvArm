@@ -5,6 +5,7 @@
 #include "register.h"
 
 PYBIND11_MODULE(_C, m) {
-    m.doc() = "CUDA kernels exposed through PyBind11";
+    m.doc() = "CPU kernels exposed through PyBind11";
     warpconvnet::bindings::register_coords(m);
+    warpconvnet::bindings::register_gemm(m);
 }
