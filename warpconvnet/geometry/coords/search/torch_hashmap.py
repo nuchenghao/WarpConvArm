@@ -2,6 +2,15 @@ import enum
 import math
 import os
 from typing import Union, Optional, Tuple
+import numpy as np
+import torch
+from torch import Tensor
+
+import warpconvnet._C as _C
+
+_EXPAND_STATUS_SUCCESS = 0
+_EXPAND_STATUS_VECTOR_OVERFLOW = 1
+_EXPAND_STATUS_TABLE_FULL = 2
 
 
 def _next_power_of_2(n: int) -> int:
@@ -16,17 +25,6 @@ def _next_power_of_2(n: int) -> int:
     n |= n >> 16
     n |= n >> 32
     return n + 1
-
-
-import numpy as np
-import torch
-from torch import Tensor
-
-import warpconvnet._C as _C
-
-_EXPAND_STATUS_SUCCESS = 0
-_EXPAND_STATUS_VECTOR_OVERFLOW = 1
-_EXPAND_STATUS_TABLE_FULL = 2
 
 
 class HashMethod(enum.Enum):
@@ -175,8 +173,6 @@ class TorchHashTable:
 
         # --- Launch Prepare Kernel ---
         _C.coords.hashmap_prepare(self._table_kvs, self._capacity)
-        # No sync needed: CUDA stream ordering guarantees prepare completes
-        # before insert starts on the same stream.
 
         # --- Launch Insert Kernel ---
         _C.coords.hashmap_insert(
@@ -232,6 +228,8 @@ class TorchHashTable:
                     f"Input vec_keys for from_keys must have dtype torch.int32 or compatible, got {vec_keys.dtype}"
                 )
 
+        # The number of dimensions must be exactly 2:
+        # the first dimension represents the number of coordinates, and the second represents the dimensionality of each coordinate.
         if vec_keys.ndim != 2:
             raise ValueError(
                 f"Input vec_keys for from_keys must be 2D, got {vec_keys.ndim} dimensions"
@@ -240,7 +238,8 @@ class TorchHashTable:
         vec_keys = vec_keys.contiguous()
 
         num_keys = len(vec_keys)
-        # Constructor enforces power-of-2 for bitwise AND hash slot computation
+        # Preparing to build the hash table.
+        # The table capacity is set to twice the number of elements, and then rounded up to the nearest power of 2.
         chosen_capacity = (
             capacity if capacity is not None else max(16, int(num_keys * 2))
         )

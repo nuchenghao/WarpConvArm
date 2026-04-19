@@ -9,6 +9,6 @@ namespace bindings {
 // and register all of its bindings.
 
 void register_coords(pybind11::module_& m);
-void register_gemm(pybind11::module_& m);
+
 }  // namespace bindings
 }  // namespace warpconvnet

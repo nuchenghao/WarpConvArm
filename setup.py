@@ -1,5 +1,8 @@
 import sys
 import os
+import shlex
+import sysconfig
+import setuptools._distutils.sysconfig as distutils_sysconfig
 from setuptools import setup
 
 try:
@@ -15,7 +18,68 @@ workspace_dir = os.path.dirname(os.path.abspath(__file__))
 ext_modules = []
 cmdclass = {}
 
+
+def _dedupe_linker_flags(flags: str) -> str:
+    deduped = []
+    seen = set()
+    for token in shlex.split(flags):
+        if token.startswith("-Wl,-rpath,") or token.startswith("-L"):
+            if token in seen:
+                continue
+            seen.add(token)
+        deduped.append(token)
+    return " ".join(deduped)
+
+
+def _dedupe_linker_command(command):
+    if isinstance(command, str):
+        return _dedupe_linker_flags(command)
+
+    deduped = []
+    seen = set()
+    for token in command:
+        if token.startswith("-Wl,-rpath,") or token.startswith("-L"):
+            if token in seen:
+                continue
+            seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _dedupe_sysconfig_linker_flags(config_module) -> None:
+    config_vars = config_module.get_config_vars()
+    for key in ("LDFLAGS", "LDSHARED", "LDCXXSHARED"):
+        value = config_vars.get(key)
+        if value:
+            config_vars[key] = _dedupe_linker_flags(value)
+
+
+class CleanBuildExtension(BuildExtension):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("use_ninja", False)
+        super().__init__(*args, **kwargs)
+
+    def build_extensions(self):
+        if sys.platform == "darwin":
+            for attr in ("linker_so", "linker_so_cxx"):
+                value = getattr(self.compiler, attr, None)
+                if value:
+                    setattr(self.compiler, attr, _dedupe_linker_command(value))
+
+            executables = getattr(self.compiler, "executables", None)
+            if isinstance(executables, dict):
+                for key in ("linker_so", "linker_so_cxx"):
+                    value = executables.get(key)
+                    if value:
+                        executables[key] = _dedupe_linker_command(value)
+
+        super().build_extensions()
+
 if _HAS_TORCH:
+    if sys.platform == "darwin":
+        _dedupe_sysconfig_linker_flags(sysconfig)
+        _dedupe_sysconfig_linker_flags(distutils_sysconfig)
+
     include_dirs = [
         os.path.join(workspace_dir, "warpconvnet/csrc/include"),
     ]
@@ -33,18 +97,15 @@ if _HAS_TORCH:
             sources=[
                 "warpconvnet/csrc/warpconvnet_pybind.cpp",
                 "warpconvnet/csrc/hashmap_kernels.cpp",
-                "warpconvnet/csrc/discrete_kernels.cpp",
                 "warpconvnet/csrc/coords_launch.cpp",
                 "warpconvnet/csrc/bindings/coords_bindings.cpp",
-                "warpconvnet/csrc/bindings/gemm_bindings.cpp",
-                "warpconvnet/csrc/mask_gemm_kernels.cpp",
             ],
             include_dirs=include_dirs,
             extra_compile_args={"cxx": cxx_args},
             extra_link_args=extra_link_args,
         )
     ]
-    cmdclass = {"build_ext": BuildExtension}
+    cmdclass = {"build_ext": CleanBuildExtension}
 else:
     print("PyTorch not found — skipping C++ extension build.")
 

@@ -1,91 +1,35 @@
 #include "coords.h"
+#include "hashmap.h"
 
+// Initialize the hash table.
 void coords_hashmap_prepare(torch::Tensor table_kvs, int capacity) {
     check_cpu_tensor(table_kvs, "table_kvs");
-    check_dtype(table_kvs, torch::kInt32, "table_kvs");
-    TORCH_CHECK(table_kvs.numel() >= static_cast<long long>(capacity) * 2,
-                "table_kvs is too small");
-    hashmap_prepare(table_kvs.data_ptr<int>(), capacity);
+    TORCH_CHECK(table_kvs.scalar_type() == torch::kInt32, "table_kvs must be int32");
+    TORCH_CHECK(table_kvs.numel() == static_cast<int64_t>(capacity) * 2, "table_kvs shape does not match capacity");
+    prepare_key_value_pairs(table_kvs.data_ptr<int32_t>(), capacity);
 }
 
-void coords_hashmap_insert(torch::Tensor table_kvs, torch::Tensor vector_keys, int num_keys,
-                           int key_dim, int capacity, int hash_method) {
+// insert keys to hashtable
+void coords_hashmap_insert(torch::Tensor table_kvs,    // the hashtable；The corresponding _table_kvs
+                           torch::Tensor vector_keys,  // the list of keys；The corresponding _vector_keys
+                           int num_keys,               // the num of vector_keys
+                           int key_dim,
+                           int capacity,  // the capacity of table_kvs
+                           int hash_method) {
     check_cpu_tensor(table_kvs, "table_kvs");
     check_cpu_tensor(vector_keys, "vector_keys");
-    check_dtype(table_kvs, torch::kInt32, "table_kvs");
-    check_dtype(vector_keys, torch::kInt32, "vector_keys");
-    hashmap_insert(table_kvs.data_ptr<int>(), vector_keys.data_ptr<int>(), num_keys, key_dim,
-                   capacity, hash_method);
-}
+    TORCH_CHECK(vector_keys.scalar_type() == torch::kInt32, "vector_keys must be int32");
+    TORCH_CHECK(vector_keys.dim() == 2, "vector_keys must be 2D");
+    TORCH_CHECK(vector_keys.size(1) == key_dim, "vector_keys key_dim mismatch");
+    TORCH_CHECK(num_keys <= vector_keys.size(0), "num_keys exceeds vector_keys rows");
 
-void coords_hashmap_search(torch::Tensor table_kvs, torch::Tensor vector_keys,
-                           torch::Tensor search_keys, torch::Tensor results, int num_search,
-                           int key_dim, int capacity, int hash_method) {
-    check_cpu_tensor(table_kvs, "table_kvs");
-    check_cpu_tensor(vector_keys, "vector_keys");
-    check_cpu_tensor(search_keys, "search_keys");
-    check_cpu_tensor(results, "results");
-    check_dtype(table_kvs, torch::kInt32, "table_kvs");
-    check_dtype(vector_keys, torch::kInt32, "vector_keys");
-    check_dtype(search_keys, torch::kInt32, "search_keys");
-    check_dtype(results, torch::kInt32, "results");
-    hashmap_search(table_kvs.data_ptr<int>(), vector_keys.data_ptr<int>(),
-                   search_keys.data_ptr<int>(), results.data_ptr<int>(), num_search, key_dim,
-                   capacity, hash_method);
-}
+    auto* table_ptr = flatten_table_ptr(table_kvs);  // Get the underlying data pointer of table_kvs
+    const auto* keys_ptr = flatten_keys_ptr(vector_keys);
 
-void coords_hashmap_warp_search(torch::Tensor table_kvs, torch::Tensor vector_keys,
-                                torch::Tensor search_keys, torch::Tensor results, int num_search,
-                                int key_dim, int capacity, int hash_method) {
-    check_cpu_tensor(table_kvs, "table_kvs");
-    check_cpu_tensor(vector_keys, "vector_keys");
-    check_cpu_tensor(search_keys, "search_keys");
-    check_cpu_tensor(results, "results");
-    check_dtype(table_kvs, torch::kInt32, "table_kvs");
-    check_dtype(vector_keys, torch::kInt32, "vector_keys");
-    check_dtype(search_keys, torch::kInt32, "search_keys");
-    check_dtype(results, torch::kInt32, "results");
-    hashmap_warp_search(table_kvs.data_ptr<int>(), vector_keys.data_ptr<int>(),
-                        search_keys.data_ptr<int>(), results.data_ptr<int>(), num_search, key_dim,
-                        capacity, hash_method);
-}
-
-void coords_kernel_map_offset(torch::Tensor table_kvs, torch::Tensor vector_keys,
-                              torch::Tensor query_coords, torch::Tensor kernel_offsets,
-                              torch::Tensor output, int num_query, int key_dim, int num_offsets,
-                              int capacity, int hash_method, int, int) {
-    check_cpu_tensor(table_kvs, "table_kvs");
-    check_cpu_tensor(vector_keys, "vector_keys");
-    check_cpu_tensor(query_coords, "query_coords");
-    check_cpu_tensor(kernel_offsets, "kernel_offsets");
-    check_cpu_tensor(output, "output");
-    check_dtype(table_kvs, torch::kInt32, "table_kvs");
-    check_dtype(vector_keys, torch::kInt32, "vector_keys");
-    check_dtype(query_coords, torch::kInt32, "query_coords");
-    check_dtype(kernel_offsets, torch::kInt32, "kernel_offsets");
-    check_dtype(output, torch::kInt32, "output");
-
-    kernel_map_offset(table_kvs.data_ptr<int>(), vector_keys.data_ptr<int>(),
-                      query_coords.data_ptr<int>(), kernel_offsets.data_ptr<int>(),
-                      output.data_ptr<int>(), num_query, key_dim, num_offsets, capacity,
-                      hash_method);
-}
-
-void coords_map_found_indices_to_maps(torch::Tensor found, torch::Tensor mapped,
-                                      torch::Tensor offsets, torch::Tensor in_maps,
-                                      torch::Tensor out_maps, int K, int M) {
-    check_cpu_tensor(found, "found");
-    check_cpu_tensor(mapped, "mapped");
-    check_cpu_tensor(offsets, "offsets");
-    check_cpu_tensor(in_maps, "in_maps");
-    check_cpu_tensor(out_maps, "out_maps");
-    check_dtype(found, torch::kInt32, "found");
-    check_dtype(mapped, torch::kInt32, "mapped");
-    check_dtype(offsets, torch::kInt32, "offsets");
-    check_dtype(in_maps, torch::kInt32, "in_maps");
-    check_dtype(out_maps, torch::kInt32, "out_maps");
-
-    map_found_indices_to_maps(found.data_ptr<int>(), mapped.data_ptr<int>(),
-                              offsets.data_ptr<int>(), in_maps.data_ptr<int>(),
-                              out_maps.data_ptr<int>(), K, M);
+    for (int key_index = 0; key_index < num_keys; ++key_index) {
+        bool inserted = false;
+        const int slot = insert_hash_table(table_ptr, keys_ptr, keys_ptr + key_index * key_dim, key_dim, capacity, hash_method,
+                                           key_index, &inserted);
+        TORCH_CHECK(slot >= 0, "Hash table is full while inserting coordinates");
+    }
 }
