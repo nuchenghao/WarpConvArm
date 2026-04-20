@@ -16,6 +16,13 @@ inline const int32_t* flatten_keys_ptr(const torch::Tensor& vector_keys) {
     return vector_keys.data_ptr<int32_t>();
 }
 
-int insert_hash_table(int32_t* table_kvs, const int32_t* vector_keys, const int32_t* key,
-                      int key_dim, int capacity, int hash_method, int vector_index,
-                      bool* inserted);
+void prepare_key_value_pairs(int* table_kvs, int capacity);
+
+bool insert_hash_table_parallel(int32_t* table_kvs, const int32_t* vector_keys, int num_keys, int key_dim, int capacity,
+                                int hash_method);
+
+void search_hash_table(const int32_t* table_kvs, const int32_t* vector_keys, const int32_t* search_keys, int32_t* results,
+                       int num_search, int key_dim, int capacity, int hash_method);
+
+void warp_search_hash_table(const int32_t* table_kvs, const int32_t* vector_keys, const int32_t* search_keys, int32_t* results,
+                            int num_search, int key_dim, int capacity, int hash_method);

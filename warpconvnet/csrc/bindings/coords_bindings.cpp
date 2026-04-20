@@ -8,8 +8,12 @@ void register_coords(py::module_& m) {
     // --- Hash table operations ---
     coords.def("hashmap_prepare", &coords_hashmap_prepare, py::arg("table_kvs"),
                py::arg("capacity"));  // Initialize the hash table.
-    coords.def("hashmap_insert", &coords_hashmap_insert, py::arg("table_kvs"),
-               py::arg("vector_keys"), py::arg("num_keys"), py::arg("key_dim"), py::arg("capacity"),
+    coords.def("hashmap_insert", &coords_hashmap_insert, py::arg("table_kvs"), py::arg("vector_keys"), py::arg("num_keys"),
+               py::arg("key_dim"), py::arg("capacity"), py::arg("hash_method"));
+    coords.def("hashmap_search", &coords_hashmap_search, py::arg("table_kvs"), py::arg("vector_keys"), py::arg("search_keys"),
+               py::arg("results"), py::arg("num_search"), py::arg("key_dim"), py::arg("capacity"), py::arg("hash_method"));
+    coords.def("hashmap_warp_search", &coords_hashmap_warp_search, py::arg("table_kvs"), py::arg("vector_keys"),
+               py::arg("search_keys"), py::arg("results"), py::arg("num_search"), py::arg("key_dim"), py::arg("capacity"),
                py::arg("hash_method"));
 }
 }  // namespace bindings

@@ -23,11 +23,11 @@ inline void check_cpu_tensor(const torch::Tensor& tensor, const char* name) {
 
 inline int64_t ceil_div_int64(int64_t x, int64_t y) { return (x + y - 1) / y; }
 
-/*
+/* ===============================================================================================
 Process the elements from begin to end - 1 in parallel by dividing them into chunks, [begin, end).
 The size of each chunk is grain_size.
 The specific processing logic and the target object are provided by fn.
-*/
+=============================================================================================== */
 template <typename Fn>
 inline void parallel_for(int64_t begin, int64_t end, int64_t grain_size, Fn&& fn) {
     if (end <= begin) {
