@@ -91,18 +91,47 @@ def batch_index_from_indices(
 
 @torch.inference_mode()
 def batch_indexed_coordinates(
-    batched_coords: Float[Tensor, "N 3"],  # noqa: F821
-    offsets: Int[Tensor, "B + 1"],  # noqa: F821
-) -> Float[Tensor, "N 4"]:  # noqa: F821
-    batch_index = batch_index_from_offset(offsets).to(batched_coords)
+    batched_coords: Float[Tensor, "N 3"],
+    offsets: Int[Tensor, "B + 1"],
+) -> Float[Tensor, "N 4"]:
+    """
+    The purpose of this function is to convert a concatenated set of points containing only 3D coordinates into coordinates with batch IDs.
+
+    Inputs:
+        batched_coords[N, 3] represents a total of N points, where each point has exactly 3 coordinates, e.g., (x, y, z)
+        offsets[B+1] indicates that these N points actually come from B batches, and each batch is stored contiguously in batched_coords
+    Outputs:
+        Float[Tensor, "N 4"]: a batch index is prepended to each point, resulting in (b, x, y, z)
+
+    Example:
+        batched_coords = tensor([
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [10.0, 11.0, 12.0],
+        ])
+        offsets = tensor([0, 2, 4])
+
+        Output batched_coords:
+        tensor([
+            [0.0,  1.0,  2.0,  3.0],
+            [0.0,  4.0,  5.0,  6.0],
+            [1.0,  7.0,  8.0,  9.0],
+            [1.0, 10.0, 11.0, 12.0],
+        ])
+    """
+
+    batch_index = batch_index_from_offset(offsets).to(
+        batched_coords
+    )  # Generate the batch index for each point based on the provided offsets.
     batched_coords = torch.cat([batch_index.unsqueeze(1), batched_coords], dim=1)
     return batched_coords
 
 
 @torch.inference_mode()
 def offsets_from_batch_index_consecutive(
-    batch_index: Int[Tensor, "N"],  # noqa: F821
-) -> Int[Tensor, "B + 1"]:  # noqa: F821
+    batch_index: Int[Tensor, "N"],
+) -> Int[Tensor, "B + 1"]:
     """
     Given a list of batch indices [0, 0, 1, 1, 2, 2, 2, 3, 3],
     return the offsets [0, 2, 4, 7, 9].

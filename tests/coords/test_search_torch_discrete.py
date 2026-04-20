@@ -31,7 +31,9 @@ def test_kernel_map_from_offset(setup_voxels, device):
     )
 
     bcoords = batch_indexed_coordinates(voxels.coordinate_tensor, voxels.offsets)
-    voxel_hashmap = voxels.coordinate_hashmap
+    voxel_hashmap = (
+        voxels.coordinate_hashmap
+    )  # Batch information was already included when constructing the hash table.
 
     kernel_map: IntSearchResult = _kernel_map_from_offsets(
         voxel_hashmap,

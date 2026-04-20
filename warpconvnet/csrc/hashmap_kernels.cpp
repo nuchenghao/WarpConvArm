@@ -7,19 +7,13 @@ Initialize the hash table:
     Partition the hash table into chunks. The chunk size is determined by recommended_chunk_size.
     The chunks are then processed in parallel.
 ==================================================================== */
-std::size_t recommended_chunk_size(std::size_t count) {
-    const std::size_t threads =
-        std::max<std::size_t>(1, static_cast<std::size_t>(at::get_num_threads()));  // get the num of cpu cores
-    const std::size_t desired_chunks = threads * 4;                                 // trade-off
-    return std::max<std::size_t>(1, (count + desired_chunks - 1) / desired_chunks);
-}
 
-void prepare_key_value_pairs(int* table_kvs, int capacity) {
+void prepare_key_value_pairs(int32_t* hash_table_kvs_ptr, int32_t capacity) {
     const std::size_t chunk_size = recommended_chunk_size(static_cast<std::size_t>(capacity));
-    parallel_for(0, capacity, chunk_size, [table_kvs](std::size_t row) {
+    parallel_for(0, capacity, chunk_size, [hash_table_kvs_ptr](std::size_t row) {
         const std::size_t offset = row * 2;
-        table_kvs[offset] = -1;
-        table_kvs[offset] = -1;
+        hash_table_kvs_ptr[offset] = -1;
+        hash_table_kvs_ptr[offset] = -1;
     });
 }
 
@@ -117,11 +111,11 @@ constexpr int32_t kEmptyMarker = -1;
 constexpr int32_t kReservedMarker = -2;
 
 int insert_hash_table_atomic(
-    int32_t* table_kvs,          // the hashtable；The corresponding _table_kvs
+    int32_t* hash_table_kvs,     // the hashtable；The corresponding _table_kvs
     const int32_t* vector_keys,  // the list of keys；The corresponding _vector_keys
     const int32_t* key,          // Pointer to the key to be processed
     int key_dim,
-    int capacity,  //  the capacity of table_kvs
+    int capacity,  //  the capacity of hash_table_kvs
     int hash_method,
     int vector_index,  // The index of the current key in vector_keys. This is the actual value written to the slot.
     bool* inserted) {
@@ -130,7 +124,8 @@ int insert_hash_table_atomic(
     *inserted = false;
 
     for (int attempts = 0; attempts < capacity; ++attempts) {
-        int32_t* const marker_ptr = &table_kvs[slot * 2];  // table_kvs[slot * 2] is marker; table_kvs[slot * 2 + 1] is value
+        int32_t* const marker_ptr =
+            &hash_table_kvs[slot * 2];  // hash_table_kvs[slot * 2] is marker; hash_table_kvs[slot * 2 + 1] is value
         std::atomic_ref<int32_t> marker_ref(*marker_ptr);  // Wrap this int32_t into an atomically accessible reference.
         int32_t marker = marker_ref.load(std::memory_order_acquire);
 
@@ -144,7 +139,7 @@ int insert_hash_table_atomic(
             int32_t expected = kEmptyMarker;
             if (marker_ref.compare_exchange_strong(expected, kReservedMarker, std::memory_order_acq_rel,
                                                    std::memory_order_acquire)) {
-                table_kvs[slot * 2 + 1] = vector_index;
+                hash_table_kvs[slot * 2 + 1] = vector_index;
                 marker_ref.store(slot, std::memory_order_release);
                 *inserted = true;
                 return slot;
@@ -159,7 +154,7 @@ int insert_hash_table_atomic(
         }
 
         if (marker >= 0) {
-            const int32_t value = table_kvs[slot * 2 + 1];
+            const int32_t value = hash_table_kvs[slot * 2 + 1];
             if (value >= 0 && key_equals(vector_keys + value * key_dim, key, key_dim)) {
                 return slot;
             }
@@ -174,7 +169,7 @@ int insert_hash_table_atomic(
     return -1;
 }
 
-bool insert_hash_table_parallel(int32_t* table_kvs, const int32_t* vector_keys, int num_keys, int key_dim, int capacity,
+bool insert_hash_table_parallel(int32_t* hash_table_kvs, const int32_t* vector_keys, int num_keys, int key_dim, int capacity,
                                 int hash_method) {
     if (num_keys <= 0) {
         return true;
@@ -189,8 +184,9 @@ bool insert_hash_table_parallel(int32_t* table_kvs, const int32_t* vector_keys, 
         }
 
         bool inserted = false;
-        const int slot = insert_hash_table_atomic(table_kvs, vector_keys, vector_keys + key_index * static_cast<int64_t>(key_dim),
-                                                  key_dim, capacity, hash_method, static_cast<int>(key_index), &inserted);
+        const int slot =
+            insert_hash_table_atomic(hash_table_kvs, vector_keys, vector_keys + key_index * static_cast<int64_t>(key_dim),
+                                     key_dim, capacity, hash_method, static_cast<int>(key_index), &inserted);
         if (slot < 0) {
             failed.store(true, std::memory_order_relaxed);
         }
@@ -203,17 +199,19 @@ bool insert_hash_table_parallel(int32_t* table_kvs, const int32_t* vector_keys, 
 Search keys using hash table.
 ======================================================================================================= */
 
-int search_hash_table_single(const int32_t* table_kvs, const int32_t* vector_keys, const int32_t* query_key, int key_dim,
-                             int capacity, int hash_method) {
-    const int initial_slot = hash_key(query_key, key_dim, capacity, hash_method);
+// Perform one hash table lookup per query
+// Return the index in vector_keys
+int search_hash_table_once(const int32_t* hash_table_kvs_ptr, const int32_t* vector_keys_ptr, const int32_t* query_key_ptr,
+                           int key_dim, int capacity, int hash_method) {
+    const int initial_slot = hash_key(query_key_ptr, key_dim, capacity, hash_method);
     int slot = initial_slot;
     for (int attempts = 0; attempts < capacity; ++attempts) {
-        const int32_t marker = table_kvs[slot * 2];
+        const int32_t marker = hash_table_kvs_ptr[slot * 2];
         if (marker == -1) {
             return -1;
         }
-        const int32_t vector_index = table_kvs[slot * 2 + 1];
-        if (vector_index >= 0 && key_equals(vector_keys + vector_index * key_dim, query_key, key_dim)) {
+        const int32_t vector_index = hash_table_kvs_ptr[slot * 2 + 1];
+        if (vector_index >= 0 && key_equals(vector_keys_ptr + vector_index * key_dim, query_key_ptr, key_dim)) {
             return vector_index;
         }
         slot = (slot + 1) % capacity;
@@ -223,23 +221,25 @@ int search_hash_table_single(const int32_t* table_kvs, const int32_t* vector_key
     }
     return -1;
 }
+
 // Partition the queries into chunks, with each thread handling a single chunk.
 // Threads process the queries within their respective chunks sequentially.
-void search_hash_table(const int32_t* table_kvs, const int32_t* vector_keys, const int32_t* search_keys, int32_t* results,
-                       int num_search, int key_dim, int capacity, int hash_method) {
+void search_hash_table(const int32_t* hash_table_kvs_ptr, const int32_t* vector_keys_ptr, const int32_t* search_keys,
+                       int32_t* results, int num_search, int key_dim, int capacity, int hash_method) {
     if (num_search <= 0) {
         return;
     }
 
     const int64_t grain_size = static_cast<int64_t>(recommended_chunk_size(static_cast<std::size_t>(num_search)));
     parallel_for(0, num_search, grain_size, [&](int64_t idx) {
-        results[idx] = search_hash_table_single(table_kvs, vector_keys, search_keys + idx * static_cast<int64_t>(key_dim),
-                                                key_dim, capacity, hash_method);
+        results[idx] = search_hash_table_once(hash_table_kvs_ptr, vector_keys_ptr,
+                                              search_keys + idx * static_cast<int64_t>(key_dim), key_dim, capacity, hash_method);
     });
 }
 
-int search_hash_table_threaded(const int32_t* table_kvs, const int32_t* vector_keys, const int32_t* query_key, int key_dim,
-                               int capacity, int hash_method, int lane_count) {
+// used by `warp_search_hash_table`
+int search_hash_table_threaded(const int32_t* hash_table_kvs_ptr, const int32_t* vector_keys_ptr, const int32_t* query_key,
+                               int key_dim, int capacity, int hash_method, int lane_count) {
     TORCH_CHECK(lane_count > 0, "search_hash_table requires at least one lane");
 
     constexpr int32_t kProbeContinue = -3;
@@ -255,14 +255,14 @@ int search_hash_table_threaded(const int32_t* table_kvs, const int32_t* vector_k
         parallel_for(0, static_cast<int64_t>(active_lanes), 1, [&](int64_t lane) {
             const int probe_offset = base_offset + static_cast<int>(lane);
             const int slot = (initial_slot + probe_offset) % capacity;
-            const int32_t marker = table_kvs[slot * 2];
+            const int32_t marker = hash_table_kvs_ptr[slot * 2];
             if (marker == kEmptyMarker) {
                 probe_results[static_cast<std::size_t>(lane)] = kProbeEmpty;
                 return;
             }
 
-            const int32_t vector_index = table_kvs[slot * 2 + 1];
-            if (vector_index >= 0 && key_equals(vector_keys + vector_index * key_dim, query_key, key_dim)) {
+            const int32_t vector_index = hash_table_kvs_ptr[slot * 2 + 1];
+            if (vector_index >= 0 && key_equals(vector_keys_ptr + vector_index * key_dim, query_key, key_dim)) {
                 probe_results[static_cast<std::size_t>(lane)] = vector_index;
             }
         });
@@ -281,16 +281,17 @@ int search_hash_table_threaded(const int32_t* table_kvs, const int32_t* vector_k
     return -1;
 }
 // Attempted to execute multiple searches at once for each query, but it isn't efficient enough.
-void warp_search_hash_table(const int32_t* table_kvs, const int32_t* vector_keys, const int32_t* search_keys, int32_t* results,
-                            int num_search, int key_dim, int capacity, int hash_method) {
+// This function is not actually used!!!
+void warp_search_hash_table(const int32_t* hash_table_kvs_ptr, const int32_t* vector_keys_ptr, const int32_t* search_keys,
+                            int32_t* results, int num_search, int key_dim, int capacity, int hash_method) {
     if (num_search <= 0) {
         return;
     }
 
     const int lane_count = std::max(1, at::get_num_threads());
     for (int query_index = 0; query_index < num_search; ++query_index) {
-        results[query_index] =
-            search_hash_table_threaded(table_kvs, vector_keys, search_keys + static_cast<int64_t>(query_index) * key_dim, key_dim,
-                                       capacity, hash_method, lane_count);
+        results[query_index] = search_hash_table_threaded(hash_table_kvs_ptr, vector_keys_ptr,
+                                                          search_keys + static_cast<int64_t>(query_index) * key_dim, key_dim,
+                                                          capacity, hash_method, lane_count);
     }
 }

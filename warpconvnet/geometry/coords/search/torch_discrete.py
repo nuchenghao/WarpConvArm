@@ -64,25 +64,50 @@ def _kernel_map_search_to_result(
     found_in_coord_index: Int[Tensor, "K M"],
     identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block: int = 256,
 ) -> Int[Tensor, "K M"] | IntSearchResult:
-    """Processes the raw found_in_coord_index tensor into the desired format.
-
-    The found_in_coord_index is a tensor of shape (K, M) where K is the number of kernel offsets and M is the number of query coordinates. The value is the index of the query coordinate if the kernel offset is found in the query coordinate, otherwise -1. We remove the -1 values and return valid indices for each kernel offset.
-
-    The return_type offset means the offsets will contain [0, K_0, K_0 + K_1, ...] where K_i is the number of valid maps for the i-th kernel offset.
     """
+    Processes the raw found_in_coord_index tensor into the desired format.
+
+    The found_in_coord_index is a tensor of shape (K, M) where K is the number of kernel offsets and M is the number of query coordinates.
+    The value is the index of the input coordinate if the kernel offset is found in the query coordinate, otherwise -1.
+    We remove the -1 values and return valid indices for each kernel offset.
+
+    The return value:
+        in_maps: All input indices that resulted in a hit.
+        out_maps: The corresponding output or query indices.
+        offsets: Defines the segment within these two arrays belonging to each kernel offset, [ offset[i], offset[i+1] ) belonging to kernel_offsets[i]
+
+    Example:
+        found_in_coord_index =
+            tensor([
+                [10, -1,  4, -1, -1,  8],
+                [-1,  3, -1,  6,  9, -1],
+            ], dtype=torch.int32)
+
+        in_maps  = [10, 4, 8, 3, 6, 9]
+        out_maps = [ 0, 2, 5, 1, 3, 4]
+        offsets  = [ 0, 3, 6]
+
+
+    """
+
     target_device = found_in_coord_index.device
     K, M = found_in_coord_index.shape
 
     if return_type == "indices":
         return found_in_coord_index
 
-    assert return_type == "offsets"
+    assert (
+        return_type == "offsets"
+    )  # Default path. It compresses the dense [K, M] matrix into valid mappings grouped by kernel offset.
 
-    found_in_coord_index_bool = found_in_coord_index >= 0
+    found_in_coord_index_bool = (
+        found_in_coord_index >= 0
+    )  # identify which positions are valid hits
 
     # get the index of the non zero elements
+    # For each row corresponding to a kernel offset, compute the cumulative count of valid hits from left to right.
+    # Then, subtract one so that the first hit is indexed as 0, the second as 1, and so on.
     mapped_indices = (
         torch.cumsum(
             found_in_coord_index_bool.to(torch.int32), dim=1, dtype=torch.int32
@@ -116,7 +141,8 @@ def _kernel_map_search_to_result(
         mapped_indices_cont = mapped_indices.contiguous()
         offsets_cont = offsets.contiguous()
 
-        _C.coords.map_found_indices_to_maps(
+        # Organize the previously prepared 'intermediate results' into the final sparse mapping arrays, in_maps and out_maps
+        _C.coords.map_found_indices_to_inoutmaps(
             found_in_coord_index_cont,
             mapped_indices_cont,
             offsets_cont,
@@ -141,13 +167,17 @@ def _kernel_map_from_offsets(
     kernel_offsets: Int[Tensor, "K D_1"],
     identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block_x: int = 64,
-    threads_per_block_y: int = 8,
 ) -> Int[Tensor, "K N"] | IntSearchResult:
     """
-    Compute the kernel map (input index, output index) for each kernel offset using TorchHashTable.
-    Assumes D_1 includes batch dimension (e.g., 4 for 3D spatial + batch).
+    Based on a set of query coordinates (batched_query_coords) and kernel offsets (kernel_offsets),
+    look up the input points corresponding to each query point under each offset in the hashtable.
+    This process constructs the kernel map required for sparse convolution.
+
+    For each output point and each kernel offset, search the input coordinate set for a corresponding input point.
+    If a match is found, record the connection between the input index and the output index.
+
     """
+
     target_device = hashtable.device
     assert (
         target_device == batched_query_coords.device
@@ -179,7 +209,7 @@ def _kernel_map_from_offsets(
     key_dim = batched_query_coords.shape[1]
     num_kernel_offsets = kernel_offsets.shape[0]
 
-    # Allocate output tensor
+    # Allocate a raw search result tensor with a shape of [K, N], representing the k-th kernel offset and the n-th query coordinate.
     found_in_coord_index = torch.empty(
         (num_kernel_offsets, num_query_coords),
         dtype=torch.int32,
@@ -187,6 +217,7 @@ def _kernel_map_from_offsets(
     )
 
     # Launch the kernel
+    # torch::Tensor is not the actual data buffer; it is an object handle that points to an underlying storage.
     _C.coords.kernel_map_offset(
         hashtable._table_kvs.contiguous(),
         hashtable.vector_keys.contiguous(),
@@ -198,10 +229,9 @@ def _kernel_map_from_offsets(
         num_kernel_offsets,
         hashtable.capacity,
         hashtable.hash_method.value,
-        threads_per_block_x,
-        threads_per_block_y,
     )
 
+    # Reformat the raw matching matrix found_in_coord_index obtained from the previous search into a result format better suited for subsequent sparse convolution operations
     return _kernel_map_search_to_result(
         found_in_coord_index,
         identity_map_index=identity_map_index,

@@ -28,4 +28,4 @@ def _create_voxels_data(
 @pytest.fixture
 def setup_voxels(device):
     """Setup medium test voxels with random coordinates and features."""
-    return _create_voxels_data(B=3, min_N=100000, max_N=1000000, C=7, device=device)
+    return _create_voxels_data(B=30, min_N=1000000, max_N=10000000, C=7, device=device)

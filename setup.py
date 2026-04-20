@@ -46,12 +46,49 @@ def _dedupe_linker_command(command):
     return deduped
 
 
+def _strip_optimization_command(command):
+    if isinstance(command, str):
+        return _strip_optimization_flags(command)
+
+    filtered = []
+    for token in command:
+        if token.startswith("-O"):
+            continue
+        filtered.append(token)
+    return filtered
+
+
+def _strip_optimization_flags(flags: str) -> str:
+    filtered = []
+    for token in shlex.split(flags):
+        if token.startswith("-O"):
+            continue
+        filtered.append(token)
+    return " ".join(filtered)
+
+
 def _dedupe_sysconfig_linker_flags(config_module) -> None:
     config_vars = config_module.get_config_vars()
     for key in ("LDFLAGS", "LDSHARED", "LDCXXSHARED"):
         value = config_vars.get(key)
         if value:
             config_vars[key] = _dedupe_linker_flags(value)
+
+
+def _strip_sysconfig_optimization_flags(config_module) -> None:
+    config_vars = config_module.get_config_vars()
+    for key in (
+        "OPT",
+        "CFLAGS",
+        "CXXFLAGS",
+        "PY_CFLAGS",
+        "PY_CFLAGS_NODIST",
+        "CONFIGURE_CFLAGS",
+        "CONFIGURE_CFLAGS_NODIST",
+    ):
+        value = config_vars.get(key)
+        if value:
+            config_vars[key] = _strip_optimization_flags(value)
 
 
 class CleanBuildExtension(BuildExtension):
@@ -61,6 +98,25 @@ class CleanBuildExtension(BuildExtension):
 
     def build_extensions(self):
         if sys.platform == "darwin":
+            original_spawn = self.compiler.spawn
+
+            def clean_spawn(cmd, **kwargs):
+                if isinstance(cmd, (list, tuple)):
+                    cmd = list(cmd)
+                    if "-c" in cmd:
+                        cmd = _strip_optimization_command(cmd)
+                        cmd.append("-O3")
+                    else:
+                        cmd = _dedupe_linker_command(cmd)
+                return original_spawn(cmd, **kwargs)
+
+            self.compiler.spawn = clean_spawn
+
+            for attr in ("compiler", "compiler_so", "compiler_cxx"):
+                value = getattr(self.compiler, attr, None)
+                if value:
+                    setattr(self.compiler, attr, _strip_optimization_command(value))
+
             for attr in ("linker_so", "linker_so_cxx"):
                 value = getattr(self.compiler, attr, None)
                 if value:
@@ -68,6 +124,11 @@ class CleanBuildExtension(BuildExtension):
 
             executables = getattr(self.compiler, "executables", None)
             if isinstance(executables, dict):
+                for key in ("compiler", "compiler_so", "compiler_cxx"):
+                    value = executables.get(key)
+                    if value:
+                        executables[key] = _strip_optimization_command(value)
+
                 for key in ("linker_so", "linker_so_cxx"):
                     value = executables.get(key)
                     if value:
@@ -77,6 +138,8 @@ class CleanBuildExtension(BuildExtension):
 
 if _HAS_TORCH:
     if sys.platform == "darwin":
+        _strip_sysconfig_optimization_flags(sysconfig)
+        _strip_sysconfig_optimization_flags(distutils_sysconfig)
         _dedupe_sysconfig_linker_flags(sysconfig)
         _dedupe_sysconfig_linker_flags(distutils_sysconfig)
 
@@ -97,6 +160,7 @@ if _HAS_TORCH:
             sources=[
                 "warpconvnet/csrc/warpconvnet_pybind.cpp",
                 "warpconvnet/csrc/hashmap_kernels.cpp",
+                "warpconvnet/csrc/discrete_kernels.cpp",
                 "warpconvnet/csrc/coords_launch.cpp",
                 "warpconvnet/csrc/bindings/coords_bindings.cpp",
             ],
