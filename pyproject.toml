@@ -13,5 +13,5 @@ where = ["."]
 pythonpath = ["."]
 
 [tool.black]
-line-length = 88
+line-length = 150
 target-version = ["py313"]

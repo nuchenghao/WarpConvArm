@@ -3,6 +3,13 @@
 # Datasets
 data/
 
+# Large generated artifacts
+profiler_export_trace.json
+*.pt
+*.pth
+*.onnx
+*.trace
+
 # .so
 *.so
 

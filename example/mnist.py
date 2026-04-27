@@ -6,16 +6,15 @@ import torch.optim as optim
 from torch import Tensor
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
-from warpconvnet.geometry.types.voxels import Voxels
-from warpconvnet.nn.functional.sparse_pool import sparse_max_pool
-from warpconvnet.nn.modules.sequential import Sequential
-from warpconvnet.nn.modules.sparse_conv import SparseConv2d
-from warpconvnet.utils.timer import Timer
+from torch.profiler import profile, record_function, ProfilerActivity
 
 
 class Net(nn.Module):
     def __init__(self):
         super().__init__()
+        from warpconvnet.nn.modules.sequential import Sequential
+        from warpconvnet.nn.modules.sparse_conv import SparseConv2d
+
         # must use Sequential here to use spatial ops such as SparseConv2d
         self.layers = Sequential(
             SparseConv2d(1, 32, kernel_size=3, stride=1),
@@ -32,6 +31,9 @@ class Net(nn.Module):
         )
 
     def forward(self, x: Tensor):
+        from warpconvnet.geometry.types.voxels import Voxels
+        from warpconvnet.nn.functional.sparse_pool import sparse_max_pool
+
         x = Voxels.from_dense(x)
         x = self.layers(x)
         x = sparse_max_pool(x, kernel_size=(2, 2), stride=(2, 2))
@@ -40,6 +42,21 @@ class Net(nn.Module):
         x = self.head(x)
         output = F.log_softmax(x, dim=1)
         return output
+
+
+def train(model, device, train_loader, optimizer, epoch):
+    model.train()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = F.nll_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        if batch_idx % 100 == 0:
+            print(
+                f"Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} " f"({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}"
+            )
 
 
 def test(model, device, test_loader):
@@ -56,21 +73,21 @@ def test(model, device, test_loader):
 
     test_loss /= len(test_loader.dataset)
     accuracy = 100.0 * correct / len(test_loader.dataset)
-    print(
-        f"\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({accuracy:.2f}%)\n"
-    )
+    print(f"\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({accuracy:.2f}%)\n")
     return accuracy
 
 
 def main(
     batch_size: int = 128,
-    test_batch_size: int = 1000,
-    epochs: int = 1,
+    test_batch_size: int = 512,
+    epochs: int = 2,
     lr: float = 1e-3,
     scheduler_step_size: int = 10,
     gamma: float = 0.7,
     device: str = "cpu",
 ):
+    from warpconvnet.utils.timer import Timer
+
     torch.manual_seed(1)
 
     train_loader = torch.utils.data.DataLoader(
@@ -82,6 +99,7 @@ def main(
         ),
         batch_size=batch_size,
         shuffle=True,
+        num_workers=2,
     )
 
     test_loader = torch.utils.data.DataLoader(
@@ -92,15 +110,23 @@ def main(
         ),
         batch_size=test_batch_size,
         shuffle=True,
+        num_workers=2,
     )
 
     model = Net().to(device)
+    # with Timer() as t:
+    #     accuracy = test(model, device, test_loader)
+    # print(f"start accuracy: {accuracy:.2f}%, elapsed: {t.elapsed:.3f}s")
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = StepLR(optimizer, step_size=scheduler_step_size, gamma=gamma)
-
-    with Timer() as t:
+    # with profile(activities=[ProfilerActivity.CPU]) as prof:
+    for epoch in range(1, epochs + 1):
+        with Timer() as t:
+            train(model, device, train_loader, optimizer, epoch)
         accuracy = test(model, device, test_loader)
-    print(f"start accuracy: {accuracy:.2f}%, elapsed: {t.elapsed:.3f}s")
+        scheduler.step()
+    # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+    print(f"Final accuracy: {accuracy:.2f}%, elapsed: {t.min_elapsed:.3f}s")
 
 
 if __name__ == "__main__":

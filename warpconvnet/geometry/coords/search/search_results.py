@@ -14,16 +14,16 @@ class IntSearchResult:
     """
 
     # The indices of the neighbors
-    in_maps: Int[Tensor, "L"]  # noqa: F821
-    out_maps: Int[Tensor, "L"]  # noqa: F821
-    offsets: Int[Tensor, "K + 1"]  # noqa: F821
+    in_maps: Int[Tensor, "L"]
+    out_maps: Int[Tensor, "L"]
+    offsets: Int[Tensor, "K + 1"]
     identity_map_index: Optional[int] = None
 
     def __init__(
         self,
-        in_maps: Int[Tensor, "L"],  # noqa: F821
-        out_maps: Int[Tensor, "L"],  # noqa: F821
-        offsets: Int[Tensor, "K + 1"],  # noqa: F821
+        in_maps: Int[Tensor, "L"],
+        out_maps: Int[Tensor, "L"],
+        offsets: Int[Tensor, "K + 1"],
         identity_map_index: Optional[int] = None,
     ):
         assert len(in_maps) == len(out_maps) == offsets[-1].item()
@@ -40,9 +40,7 @@ class IntSearchResult:
         self._grouped_params_cache: dict = {}
 
     @torch.no_grad()
-    def __getitem__(
-        self, idx: int
-    ) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821
+    def __getitem__(self, idx: int) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:
         start, end = self.offsets[idx], self.offsets[idx + 1]
         return self.in_maps[start:end], self.out_maps[start:end]
 
@@ -52,7 +50,7 @@ class IntSearchResult:
         start_idx: int,
         end_idx: int,
         out_format: Literal["list", "tensor"] = "list",
-    ) -> Tuple[List[Int[Tensor, "N"]], List[Int[Tensor, "N"]]]:  # noqa: F821
+    ) -> Tuple[List[Int[Tensor, "N"]], List[Int[Tensor, "N"]]]:
         in_maps = []
         out_maps = []
         for i in range(start_idx, end_idx):
@@ -100,7 +98,7 @@ class IntSearchResult:
     @torch.no_grad()
     def to_csr(
         self,
-    ) -> Tuple[Int[Tensor, "L"], Int[Tensor, "K"], Int[Tensor, "K + 1"]]:  # noqa: F821
+    ) -> Tuple[Int[Tensor, "L"], Int[Tensor, "K"], Int[Tensor, "K + 1"]]:
         """
         Convert the neighbor search result to a CSR format.
 
@@ -114,9 +112,7 @@ class IntSearchResult:
         # Sort the out_maps and get the indices
         out_maps_sorted, out_maps_indices = torch.sort(out_maps)
         # cchoy: Could skip the sorting by implementing a custom warp kernel
-        unique_out_maps_sorted, num_unique = torch.unique(
-            out_maps_sorted, return_counts=True, sorted=True
-        )
+        unique_out_maps_sorted, num_unique = torch.unique(out_maps_sorted, return_counts=True, sorted=True)
 
         # Get the in_maps from the indices
         in_maps_sorted = in_maps[out_maps_indices]

@@ -136,6 +136,7 @@ class CleanBuildExtension(BuildExtension):
 
         super().build_extensions()
 
+
 if _HAS_TORCH:
     if sys.platform == "darwin":
         _strip_sysconfig_optimization_flags(sysconfig)
@@ -163,6 +164,8 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/discrete_kernels.cpp",
                 "warpconvnet/csrc/coords_launch.cpp",
                 "warpconvnet/csrc/bindings/coords_bindings.cpp",
+                "warpconvnet/csrc/bindings/gemm_bindings.cpp",
+                "warpconvnet/csrc/implicit_gemm.cpp",
             ],
             include_dirs=include_dirs,
             extra_compile_args={"cxx": cxx_args},

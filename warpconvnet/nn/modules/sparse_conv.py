@@ -23,79 +23,49 @@ from warpconvnet.nn.functional.sparse_conv import (
 from warpconvnet.utils.ntuple import ntuple
 from warpconvnet.constants import (
     WARPCONVNET_FWD_ALGO_MODE,
-    WARPCONVNET_BWD_ALGO_MODE,
+    WARPCONVNET_DGRAD_ALGO_MODE,
+    WARPCONVNET_WGRAD_ALGO_MODE,
 )
 
 
 class SpatiallySparseConv(BaseSpatialModule):
-    """Sparse convolution layer for `warpconvnet.geometry.types.voxels.Voxels`.
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input feature channels.
-    out_channels : int
-        Number of output feature channels.
-    kernel_size : int or tuple of int
-        Size of the convolution kernel.
-    stride : int or tuple of int, optional
-        Convolution stride. Defaults to ``1``.
-    dilation : int or tuple of int, optional
-        Spacing between kernel elements. Defaults to ``1``.
-    bias : bool, optional
-        If ``True`` adds a learnable bias to the output. Defaults to ``True``.
-    transposed : bool, optional
-        Perform a transposed convolution. Defaults to ``False``.
-    generative : bool, optional
-        Use generative convolution. Defaults to ``False``.
-    kernel_matmul_batch_size : int, optional
-        Batch size used for implicit matrix multiplications. Defaults to ``2``.
-    num_spatial_dims : int, optional
-        Number of spatial dimensions. Defaults to ``3``.
-    fwd_algo : `SPARSE_CONV_AB_ALGO_MODE` or str, optional
-        Forward (AB gather-scatter) algorithm. Defaults to environment setting.
-    dgrad_algo : `SPARSE_CONV_AB_ALGO_MODE` or str, optional
-        Dgrad (AB gather-scatter) algorithm. Defaults to environment setting.
-    wgrad_algo : `SPARSE_CONV_ATB_ALGO_MODE` or str, optional
-        Wgrad (AtB gather-gather) algorithm. Defaults to environment setting.
-    stride_mode : `STRIDED_CONV_MODE`, optional
-        How to interpret ``stride`` when ``transposed`` is ``True``.
-    order : `POINT_ORDERING`, optional
-        Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
-    compute_dtype : torch.dtype, optional
-        Data type used for intermediate computations.
-    implicit_matmul_fwd_block_size : int, optional
-        CUDA block size for implicit forward matmuls.
-    implicit_matmul_bwd_block_size : int, optional
-        CUDA block size for implicit backward matmuls.
-    """
+    """Sparse convolution layer for `warpconvnet.geometry.types.voxels.Voxels`."""
 
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int, ...]],
-        stride: Union[int, Tuple[int, ...]] = 1,
-        dilation: Union[int, Tuple[int, ...]] = 1,
-        bias: bool = True,
-        transposed: bool = False,
-        generative: bool = False,
-        kernel_matmul_batch_size: int = 2,
-        num_spatial_dims: Optional[int] = 3,
-        fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
-        stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
-        order: POINT_ORDERING = POINT_ORDERING.RANDOM,
-        compute_dtype: Optional[torch.dtype] = None,
-        implicit_matmul_fwd_block_size: Optional[int] = None,
-        implicit_matmul_bwd_block_size: Optional[int] = None,
+        in_channels: int,  # Number of input feature channels.
+        out_channels: int,  # Number of output feature channels.
+        kernel_size: Union[int, Tuple[int, ...]],  # Size of the convolution kernel.
+        stride: Union[int, Tuple[int, ...]] = 1,  # Convolution stride. Defaults to ``1``.
+        dilation: Union[int, Tuple[int, ...]] = 1,  # Spacing between kernel elements. Defaults to ``1``.
+        bias: bool = True,  # If ``True`` adds a learnable bias to the output. Defaults to ``True``.
+        transposed: bool = False,  # Perform a transposed convolution. Defaults to ``False``.
+        generative: bool = False,  # Use generative convolution. Defaults to ``False``.
+        groups: int = 1,
+        kernel_matmul_batch_size: int = 2,  # Batch size used for implicit matrix multiplications. Defaults to ``2``.
+        num_spatial_dims: Optional[int] = 3,  # Number of spatial dimensions. Defaults to ``3``.
+        fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,  # Forward (AB gather-scatter) algorithm. Defaults to environment setting.
+        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,  # Dgrad (AB gather-scatter) algorithm. Defaults to environment setting.
+        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,  # Wgrad (AtB gather-gather) algorithm. Defaults to environment setting.
+        stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,  # How to interpret ``stride`` when ``transposed`` is ``True``.
+        order: POINT_ORDERING = POINT_ORDERING.RANDOM,  # Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
+        compute_dtype: Optional[torch.dtype] = None,  # Data type used for intermediate computations.
+        use_fp16_accum: Optional[bool] = None,
     ):
         super().__init__()
-        self.num_spatial_dims = num_spatial_dims
-        self.in_channels = in_channels
+        self.num_spatial_dims = num_spatial_dims  # Defines the convolution type (2D or 3D)
+        self.in_channels = in_channels  # the input/output feature dimensions
         self.out_channels = out_channels
+        self.groups = groups
+        self.use_fp16_accum = use_fp16_accum
+        if in_channels % groups != 0:
+            raise ValueError(f"in_channels ({in_channels}) must be divisible by groups ({groups})")
+        if out_channels % groups != 0:
+            raise ValueError(f"out_channels ({out_channels}) must be divisible by groups ({groups})")
 
+        # Standardize kernel, stride, and dilation into tuples. Subsequent code can handle these as tuples uniformly,
+        # without needing to distinguish whether the user provided an integer or a tuple.
+        # kernel_size=3 will be (3, 3); stride=1 will be (1, 1)
         _kernel_size = ntuple(kernel_size, ndim=self.num_spatial_dims)
         _stride = ntuple(stride, ndim=self.num_spatial_dims)
         _dilation = ntuple(dilation, ndim=self.num_spatial_dims)
@@ -104,17 +74,17 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.stride = _stride
         self.dilation = _dilation
 
-        self.transposed = transposed
-        self.generative = generative
+        self.transposed = transposed  # Standard convolution or transposed convolution
+        self.generative = generative  # Generate new output coordinates
         self.kernel_matmul_batch_size = kernel_matmul_batch_size
 
         # Use environment variable values if not explicitly provided
         if fwd_algo is None:
             fwd_algo = WARPCONVNET_FWD_ALGO_MODE
         if dgrad_algo is None:
-            dgrad_algo = WARPCONVNET_FWD_ALGO_MODE
+            dgrad_algo = WARPCONVNET_DGRAD_ALGO_MODE
         if wgrad_algo is None:
-            wgrad_algo = WARPCONVNET_BWD_ALGO_MODE
+            wgrad_algo = WARPCONVNET_WGRAD_ALGO_MODE
 
         def _parse_algo(algo, enum_cls):
             if isinstance(algo, str):
@@ -128,14 +98,14 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.stride_mode = stride_mode
         self.order = order
         self.compute_dtype = compute_dtype
-        self.implicit_matmul_fwd_block_size = implicit_matmul_fwd_block_size
-        self.implicit_matmul_bwd_block_size = implicit_matmul_bwd_block_size
 
         self.bias: Optional[nn.Parameter] = None
 
-        self.weight = nn.Parameter(
-            torch.randn(np.prod(_kernel_size), in_channels, out_channels)
-        )
+        if groups == 1:
+            self.weight = nn.Parameter(torch.randn(np.prod(_kernel_size), in_channels, out_channels))
+        else:
+            # Group conv weight: [K, G, C_in/G, C_out/G]
+            self.weight = nn.Parameter(torch.randn(np.prod(_kernel_size), groups, in_channels // groups, out_channels // groups))
         if bias:
             self.bias = nn.Parameter(torch.randn(out_channels))
         else:
@@ -149,6 +119,8 @@ class SpatiallySparseConv(BaseSpatialModule):
             out_str += f", stride={self.stride}"
         if self.dilation != 1:
             out_str += f", dilation={self.dilation}"
+        if self.groups != 1:
+            out_str += f", groups={self.groups}"
         if self.transposed:
             out_str += f", transposed={self.transposed}"
         if self.generative:
@@ -160,8 +132,11 @@ class SpatiallySparseConv(BaseSpatialModule):
 
     def _calculate_fan_in_and_fan_out(self):
         receptive_field_size = np.prod(self.kernel_size)
-        fan_in = self.in_channels * receptive_field_size
-        fan_out = self.out_channels * receptive_field_size
+        # For group conv, each output unit sees only in_channels/groups input
+        # channels (and symmetrically out_channels/groups output channels).
+        # Matches torch.nn._ConvNd convention.
+        fan_in = (self.in_channels // self.groups) * receptive_field_size
+        fan_out = (self.out_channels // self.groups) * receptive_field_size
         return fan_in, fan_out
 
     def _calculate_correct_fan(self, mode: Literal["fan_in", "fan_out"]):
@@ -171,9 +146,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         fan_in, fan_out = self._calculate_fan_in_and_fan_out()
         return fan_in if mode == "fan_in" else fan_out
 
-    def _custom_kaiming_uniform_(
-        self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"
-    ):
+    def _custom_kaiming_uniform_(self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"):
         fan = self._calculate_correct_fan(mode)
         gain = calculate_gain(nonlinearity, a)
         std = gain / math.sqrt(fan)
@@ -206,6 +179,7 @@ class SpatiallySparseConv(BaseSpatialModule):
             stride=self.stride,
             kernel_dilation=self.dilation,
             bias=self.bias,
+            groups=self.groups,
             kernel_matmul_batch_size=self.kernel_matmul_batch_size,
             output_spatially_sparse_tensor=output_spatially_sparse_tensor,
             transposed=self.transposed,
@@ -216,59 +190,32 @@ class SpatiallySparseConv(BaseSpatialModule):
             stride_mode=self.stride_mode,
             order=self.order,
             compute_dtype=self.compute_dtype,
-            implicit_matmul_fwd_block_size=self.implicit_matmul_fwd_block_size,
-            implicit_matmul_bwd_block_size=self.implicit_matmul_bwd_block_size,
+            use_fp16_accum=self.use_fp16_accum,
         )
 
 
 class SparseConv2d(SpatiallySparseConv):
-    """2D sparse convolution.
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input feature channels.
-    out_channels : int
-        Number of output feature channels.
-    kernel_size : int or tuple of int
-        Size of the convolution kernel.
-    stride : int or tuple of int, optional
-        Convolution stride. Defaults to ``1``.
-    dilation : int or tuple of int, optional
-        Spacing between kernel elements. Defaults to ``1``.
-    bias : bool, optional
-        If ``True`` adds a learnable bias to the output. Defaults to ``True``.
-    transposed : bool, optional
-        Perform a transposed convolution. Defaults to ``False``.
-    generative : bool, optional
-        Use generative convolution. Defaults to ``False``.
-    stride_mode : `STRIDED_CONV_MODE`, optional
-        How to interpret ``stride`` when ``transposed`` is ``True``.
-    fwd_algo : str, optional
-        Forward (AB gather-scatter) algorithm.
-    dgrad_algo : str, optional
-        Dgrad (AB gather-scatter) algorithm.
-    wgrad_algo : str, optional
-        Wgrad (AtB gather-gather) algorithm.
-    """
+    """2D sparse convolution."""
 
     def __init__(
         self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride=1,
-        dilation=1,
-        bias=True,
-        transposed=False,
-        generative: bool = False,
-        stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
-        fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
-        kernel_matmul_batch_size: int = 2,
-        order: POINT_ORDERING = POINT_ORDERING.RANDOM,
-        compute_dtype: Optional[torch.dtype] = None,
+        in_channels: int,  # Number of input feature channels.
+        out_channels: int,  # Number of output feature channels.
+        kernel_size: Union[int, Tuple[int, ...]],  # Size of the convolution kernel.
+        stride: Union[int, Tuple[int, ...]] = 1,  # Convolution stride. Defaults to 1.
+        dilation: Union[int, Tuple[int, ...]] = 1,  # Spacing between kernel elements. Defaults to 1.
+        bias: bool = True,  # If True, adds a learnable bias to the output.
+        transposed: bool = False,  # Perform a transposed convolution.
+        generative: bool = False,  # Use generative convolution.
+        groups: int = 1,
+        stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,  # How to interpret stride when transposed is True.
+        fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,  # Forward (AB gather-scatter) algorithm.
+        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,  # Dgrad (AB gather-scatter) algorithm.
+        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,  # Wgrad (AtB gather-gather) algorithm.
+        kernel_matmul_batch_size: int = 2,  # Batch size used for implicit matrix multiplications.
+        order: POINT_ORDERING = POINT_ORDERING.RANDOM,  # Ordering of points in the output.
+        compute_dtype: Optional[torch.dtype] = None,  # Data type used for intermediate computations.
+        use_fp16_accum: Optional[bool] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -279,6 +226,7 @@ class SparseConv2d(SpatiallySparseConv):
             bias=bias,
             transposed=transposed,
             generative=generative,
+            groups=groups,
             num_spatial_dims=2,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
@@ -287,4 +235,5 @@ class SparseConv2d(SpatiallySparseConv):
             kernel_matmul_batch_size=kernel_matmul_batch_size,
             order=order,
             compute_dtype=compute_dtype,
+            use_fp16_accum=use_fp16_accum,
         )

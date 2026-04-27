@@ -19,6 +19,10 @@ from warpconvnet.geometry.coords.search.torch_discrete import (
 
 @dataclass
 class IntSearchCacheKey:
+    """
+    It packages the 'configuration of a kernel map search task' into a hashable object to serve as a dictionary key for caching IntSearchResult.
+    This is used in conjunction with the IntSearchCache(dict) class.
+    """
 
     kernel_size: Tuple[int, ...]
     kernel_dilation: Tuple[int, ...]
@@ -40,16 +44,19 @@ class IntSearchCacheKey:
         in_offsets,
         out_offsets,
     ):
+        # Instead of packing the full coordinates into the key, it only includes the 'convolution configuration + batch segmentation structure.' T
+        # his represents a 'lightweight key' design
         self.kernel_size = kernel_size
         self.kernel_dilation = kernel_dilation
         self.transposed = transposed
         self.generative = generative
         self.stride_mode = stride_mode
         self.skip_symmetric_kernel_map = skip_symmetric_kernel_map
-        self.in_offsets = in_offsets.detach().cpu().int()
-        self.out_offsets = out_offsets.detach().cpu().int()
+        self.in_offsets = in_offsets.detach().int()
+        self.out_offsets = out_offsets.detach().int()
 
     def __hash__(self):
+        # For a dictionary to perform efficient lookups, its keys must be hashable. The approach here is to mix the hashes of individual fields using a bitwise XOR (^) operation
         return int(
             _int_sequence_hash(self.kernel_size)
             ^ _int_sequence_hash(self.kernel_dilation)

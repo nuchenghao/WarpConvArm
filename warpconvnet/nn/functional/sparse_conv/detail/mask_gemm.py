@@ -48,9 +48,7 @@ def _build_mask_and_argsort(
     elif K <= 32:
         pair_table_2d = pair_table.reshape(K, N)
         valid = pair_table_2d >= 0
-        bit_positions = (
-            1 << torch.arange(K, device=device, dtype=torch.int32)
-        ).unsqueeze(1)
+        bit_positions = (1 << torch.arange(K, device=device, dtype=torch.int32)).unsqueeze(1)
         pair_mask = (valid.int() * bit_positions).sum(dim=0).int()
     mask_argsort = torch.argsort(pair_mask, stable=True).int()
     return pair_mask, mask_argsort
@@ -82,20 +80,12 @@ def _get_mask_data(
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Get or compute mask data, cached on the kernel_map object."""
     if kernel_map._mask_data is None:
-        kernel_map._mask_data = _kernel_map_to_mask_data(
-            kernel_map, num_out_coords, device
-        )
+        kernel_map._mask_data = _kernel_map_to_mask_data(kernel_map, num_out_coords, device)
     return kernel_map._mask_data
 
 
 def _mask_implicit_gemm_forward_logic(
-    in_features: Tensor,
-    weight: Tensor,
-    kernel_map: IntSearchResult,
-    num_out_coords: int,
-    compute_dtype: Optional[torch.dtype] = None,
-    block_size: int = 16,
-    mma_tile: int = 3,
+    in_features: Tensor, weight: Tensor, kernel_map: IntSearchResult, num_out_coords: int, compute_dtype: Optional[torch.dtype] = None
 ) -> Tensor:
     """Forward pass using mask-based fused implicit GEMM."""
     device = in_features.device
@@ -113,9 +103,7 @@ def _mask_implicit_gemm_forward_logic(
     if num_out_coords == 0 or K == 0 or C_in == 0 or C_out == 0 or N_in == 0:
         return output.to(dtype=in_features.dtype)
 
-    pair_table, pair_mask, mask_argsort = _get_mask_data(
-        kernel_map, num_out_coords, device
-    )
+    pair_table, pair_mask, mask_argsort = _get_mask_data(kernel_map, num_out_coords, device)
 
     # Auto-pad unaligned channels for CuTe tensor core eligibility
     _has_cute = hasattr(_C.gemm, "cute_gemm_mask_fwd")
@@ -123,20 +111,12 @@ def _mask_implicit_gemm_forward_logic(
     vec_width = 16 // _in_features.element_size()  # 8 for fp16/bf16
     orig_C_in, orig_C_out = C_in, C_out
     needs_padding = (C_in % vec_width != 0) or (C_out % vec_width != 0)
-    if (
-        needs_padding
-        and _use_cuda_cute_rules
-        and min_dtype in (torch.float16, torch.bfloat16)
-    ):
+    if needs_padding and _use_cuda_cute_rules and min_dtype in (torch.float16, torch.bfloat16):
         target_cin = ((C_in + vec_width - 1) // vec_width) * vec_width
         target_cout = ((C_out + vec_width - 1) // vec_width) * vec_width
         _in_features = torch.nn.functional.pad(_in_features, (0, target_cin - C_in))
-        _weight = torch.nn.functional.pad(
-            _weight, (0, target_cout - C_out, 0, target_cin - C_in)
-        )
-        output = torch.zeros(
-            (num_out_coords, target_cout), dtype=min_dtype, device=device
-        )
+        _weight = torch.nn.functional.pad(_weight, (0, target_cout - C_out, 0, target_cin - C_in))
+        output = torch.zeros((num_out_coords, target_cout), dtype=min_dtype, device=device)
         C_in, C_out = target_cin, target_cout
     aligned = True  # After padding, always aligned
 
@@ -149,21 +129,13 @@ def _mask_implicit_gemm_forward_logic(
             min_dtype = torch.float16
             # Recheck padding after dtype change
             vec_width = 16 // _in_features.element_size()
-            needs_padding = (orig_C_in % vec_width != 0) or (
-                orig_C_out % vec_width != 0
-            )
+            needs_padding = (orig_C_in % vec_width != 0) or (orig_C_out % vec_width != 0)
             if needs_padding:
                 C_in_pad = ((orig_C_in + vec_width - 1) // vec_width) * vec_width
                 C_out_pad = ((orig_C_out + vec_width - 1) // vec_width) * vec_width
-                _in_features = torch.nn.functional.pad(
-                    _in_features, (0, C_in_pad - orig_C_in)
-                )
-                _weight = torch.nn.functional.pad(
-                    _weight, (0, C_out_pad - orig_C_out, 0, C_in_pad - orig_C_in)
-                )
-                output = torch.zeros(
-                    (num_out_coords, C_out_pad), dtype=min_dtype, device=device
-                )
+                _in_features = torch.nn.functional.pad(_in_features, (0, C_in_pad - orig_C_in))
+                _weight = torch.nn.functional.pad(_weight, (0, C_out_pad - orig_C_out, 0, C_in_pad - orig_C_in))
+                output = torch.zeros((num_out_coords, C_out_pad), dtype=min_dtype, device=device)
                 C_in, C_out = C_in_pad, C_out_pad
         status = _C.gemm.cute_gemm_mask_fwd(
             _in_features,
@@ -173,18 +145,12 @@ def _mask_implicit_gemm_forward_logic(
             pair_mask,
             mask_argsort,
             K,
-            mma_tile,
             1.0,
         )
         if status == 0:
             if needs_padding:
                 output = output[:, :orig_C_out]
             return output.to(dtype=in_features.dtype)
-        raise RuntimeError(
-            f"cute_gemm_mask_fwd failed with status {status} "
-            f"(N={num_out_coords}, C_in={C_in}, C_out={C_out}, K={K})"
-        )
+        raise RuntimeError(f"cute_gemm_mask_fwd failed with status {status} " f"(N={num_out_coords}, C_in={C_in}, C_out={C_out}, K={K})")
 
-    raise RuntimeError(
-        f"mask_implicit_gemm requires CuTe backend (C_in={C_in}, C_out={C_out})"
-    )
+    raise RuntimeError(f"mask_implicit_gemm requires CuTe backend (C_in={C_in}, C_out={C_out})")

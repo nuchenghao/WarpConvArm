@@ -37,20 +37,6 @@ class SPARSE_CONV_ATB_ALGO_MODE(Enum):
     TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
 
 
-_AB_MASK_IMPLICIT_GEMM = [
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
-]
-
-# Static superset of all AB "auto" candidates (union of all adaptive branches).
-# Used by _get_filtered_AB_params for env var filtering.
-_AB_PARAMS_AUTO = [
-    *_AB_MASK_IMPLICIT_GEMM,
-]
-
-
 def _filter_benchmark_params_by_env_config(
     all_params: List[Tuple[Union[str, Any], Dict[str, Any]]],
     env_config: Union[str, List[Union[str, Any]]],
@@ -95,9 +81,7 @@ def _filter_benchmark_params_by_env_config(
             filtered_params.append((algo_str, params))
 
     if not filtered_params:
-        logger.warning(
-            f"No benchmark parameters found for algorithms {target_algos}, using all algorithms"
-        )
+        logger.warning(f"No benchmark parameters found for algorithms {target_algos}, using all algorithms")
         return all_params
 
     return filtered_params
@@ -109,9 +93,7 @@ def _get_filtered_AB_params() -> List[Tuple[str, Dict[str, Any]]]:
     For "auto", returns the static superset of all adaptive candidates.
     For "all", returns the full exhaustive set.
     """
-    return _filter_benchmark_params_by_env_config(
-        _AB_PARAMS_AUTO, WARPCONVNET_AB_ALGO_MODE, is_forward=True
-    )
+    return _filter_benchmark_params_by_env_config(_AB_PARAMS_AUTO, WARPCONVNET_AB_ALGO_MODE, is_forward=True)
 
 
 import math as _math

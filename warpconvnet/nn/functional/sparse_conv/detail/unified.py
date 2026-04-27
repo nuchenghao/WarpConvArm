@@ -1,3 +1,4 @@
+from tokenize import group
 from typing import Any, Dict, List, Optional, Tuple, Union
 from jaxtyping import Float
 
@@ -35,20 +36,19 @@ logger = get_logger(__name__)
 class UnifiedSpatiallySparseConvFunction(Function):
     @staticmethod
     def forward(
-        ctx,
-        in_features: Float[Tensor, "N C_in"],
-        weight: Float[Tensor, "K C_in C_out"],
-        kernel_map: IntSearchResult,
+        ctx,  # The context object of a PyTorch custom Function, used to save data for the backward() pass
+        in_features: Float[Tensor, "N C_in"],  # Input features of sparse points/voxels
+        weight: Float[Tensor, "K C_in C_out"],  # Standard convolutions typically use the [K, C_in, C_out] format
+        kernel_map: IntSearchResult,  # Contains the sparse convolution adjacency relationships, such as in_maps, out_maps, and offsets
         num_out_coords: int,
         fwd_algo: Union[str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]],
         dgrad_algo: Union[str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]],
         wgrad_algo: Union[str, List[Union[str, SPARSE_CONV_ATB_ALGO_MODE]]],
-        compute_dtype: Optional[torch.dtype],
-        fwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
-        bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
-        voxel_size: Optional[Tuple[int, ...]] = None,
+        compute_dtype: Optional[torch.dtype],  # Computational precision, typically resolved by an external helper under AMP
+        voxel_size: Optional[Tuple[int, ...]] = None,  # Passed to the AB adaptive candidate selection for the shape-aware strategy
+        groups: int = 1,
+        use_fp16_accum: bool = False,
     ) -> Float[Tensor, "M C_out"]:
-        global _BENCHMARK_AB_RESULTS  # noqa: F824
         output_feature_tensor = None
 
         # Normalize input algos to strings for benchmarking and caching
@@ -63,195 +63,48 @@ class UnifiedSpatiallySparseConvFunction(Function):
         dgrad_algo = _to_algo_str_list(dgrad_algo)
         wgrad_algo = _to_algo_str_list(wgrad_algo)
 
-        # UNIFIED APPROACH: Always benchmark within filtered algorithm space
-        # Step 1: Determine algorithm filter set
-        if isinstance(fwd_algo, list):
-            algorithm_filter = fwd_algo
-        elif fwd_algo in ("auto", "all", "trimmed"):
-            algorithm_filter = fwd_algo
-        else:
-            # Single algorithm - create list for consistent processing
-            algorithm_filter = [str(fwd_algo)]
-
-        # Step 2: Generate configuration for caching
         C_in = in_features.shape[1]
-        C_out = weight.shape[2]
+        C_out = weight.shape[-1] * groups if groups > 1 else weight.shape[2]
         kv = weight.shape[0]
 
-        # if algorithm_filter == "trimmed":
-        #     adaptive_fwd_params = _get_trimmed_AB_params(
-        #         C_in,
-        #         C_out,
-        #         kv,
-        #         num_in_coords=in_features.shape[0],
-        #     )
-        # else:
-        #     adaptive_fwd_params = _get_adaptive_AB_params(
-        #         C_in,
-        #         C_out,
-        #         kv,
-        #         num_in_coords=in_features.shape[0],
-        #         voxel_size=voxel_size,
-        #     )
-
-        # config = SpatiallySparseConvConfig(
-        #     num_in_coords=in_features.shape[0],
-        #     num_out_coords=num_out_coords,
-        #     in_channels=C_in,
-        #     out_channels=C_out,
-        #     kernel_volume=kv,
-        #     in_dtype=in_features.dtype,
-        # )
-
-        # Step 3: Check cache first
-        cached_result = None  # _BENCHMARK_AB_RESULTS.get(config)
-        if cached_result is not None:
-            # Support tuple (best) or list-of-tuples (best-first)
-            if isinstance(cached_result, tuple):
-                best_tuple = cached_result
-                best_list = [best_tuple]
-            else:
-                best_list = cached_result
-            if algorithm_filter in ("auto", "all", "trimmed"):
-                chosen_fwd_algo, chosen_fwd_params, _ = best_list[0]
-            else:
-                filtered_cached_results = []
-                for algo, params, time in best_list:
-                    if algo in algorithm_filter:
-                        filtered_cached_results.append((algo, params, time))
-
-                if filtered_cached_results:
-                    chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[0]
-                else:
-                    filtered_params = _filter_benchmark_params_by_env_config(
-                        adaptive_fwd_params, algorithm_filter, is_forward=True
-                    )
-                    if not filtered_params and "explicit_gemm" in algorithm_filter:
-                        chosen_fwd_algo, chosen_fwd_params = (
-                            "explicit_gemm",
-                            {},
-                        )
-                    else:
-                        all_fwd_benchmark_results = _run_forward_benchmarks(
-                            in_features,
-                            weight,
-                            kernel_map,
-                            num_out_coords,
-                            compute_dtype,
-                            custom_params=filtered_params,
-                        )
-                        _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
-                        # Save a serialized copy (algo as string) to the generic cache
-                        generic_benchmark_update_entry(
-                            "AB_gather_scatter",
-                            config,
-                            _serialize_benchmark_results(all_fwd_benchmark_results),
-                            force=False,
-                        )
-                        chosen_fwd_algo, chosen_fwd_params, _ = (
-                            all_fwd_benchmark_results[0]
-                        )
-        else:
-            # Step 4: No cache - always benchmark within filtered space
-            # if algorithm_filter in ("auto", "all", "trimmed"):
-            #     # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
-            #     filtered_params = _filter_benchmark_params_by_env_config(
-            #         adaptive_fwd_params, algorithm_filter, is_forward=True
-            #     )
-            # else:
-            #     # Filter benchmark parameters to only include algorithms in filter set
-            #     filtered_params = _filter_benchmark_params_by_env_config(
-            #         adaptive_fwd_params, algorithm_filter, is_forward=True
-            #     )
-
-            # # Always run benchmarks to find optimal parameters
-            # all_fwd_benchmark_results = _run_forward_benchmarks(
-            #     in_features,
-            #     weight,
-            #     kernel_map,
-            #     num_out_coords,
-            #     compute_dtype,
-            #     custom_params=filtered_params,
-            # )
-            # _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
-            # # Persist a serialized copy to generic cache
-            # generic_benchmark_update_entry(
-            #     "AB_gather_scatter",
-            #     config,
-            #     _serialize_benchmark_results(all_fwd_benchmark_results),
-            #     force=False,
-            # )
-            # chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
-
-            chosen_fwd_algo, chosen_fwd_params = "mask_implicit_gemm", {
-                "block_size": 16,
-                "mma_tile": 3,
-            }
-
-        # Step 5: Pre-cast weight once (avoids per-algorithm re-casting)
         if compute_dtype is not None:
             _weight_cast = weight.contiguous().to(dtype=compute_dtype)
         else:
             _weight_cast = weight.contiguous()
+        fwd_params = {}
 
         logger.debug(
-            f"[dispatch] FWD algo={chosen_fwd_algo} params={chosen_fwd_params} "
+            f"[dispatch] FWD forced algo={fwd_algo} requested={fwd_algo} "
             f"N_in={in_features.shape[0]} N_out={num_out_coords} "
-            f"C_in={in_features.shape[1]} C_out={weight.shape[2]} "
-            f"kv={weight.shape[0]} dtype={in_features.dtype}"
+            f"C_in={C_in} C_out={C_out} kv={kv} dtype={in_features.dtype}"
         )
-        try:
-            output_feature_tensor = _execute_forward(
-                chosen_fwd_algo,
-                chosen_fwd_params,
-                in_features,
-                _weight_cast,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                fwd_block_size,
-            )
-        except (RuntimeError, Exception) as e:
-            if chosen_fwd_algo == "explicit_gemm":
-                raise  # No fallback for the fallback
-            logger.warning(
-                f"Forward algorithm '{chosen_fwd_algo}' failed at execution: {e}. "
-                f"Falling back to explicit_gemm."
-            )
-            # Invalidate the cached result for this config
-            # _BENCHMARK_AB_RESULTS.pop(config, None)
-            # output_feature_tensor = _execute_forward(
-            #     "explicit_gemm",
-            #     {},
-            #     in_features,
-            #     _weight_cast,
-            #     kernel_map,
-            #     num_out_coords,
-            #     compute_dtype,
-            #     fwd_block_size,
-            # )
-
-        # Save backward state when any input requires gradients.
-        # Note: torch.is_grad_enabled() is False inside Function.forward()
-        # by design (PyTorch >= 2.1), so we check needs_input_grad instead.
+        output_feature_tensor = _execute_forward(
+            fwd_algo,
+            fwd_params,
+            in_features,
+            _weight_cast,
+            kernel_map,
+            num_out_coords,
+            compute_dtype,
+            groups=groups,
+            use_fp16_accum=use_fp16_accum,
+        )
+        # Save only the state needed by the explicit backward path.
         if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
             ctx.save_for_backward(in_features, weight)
             ctx.kernel_map = kernel_map
+            ctx.use_fp16_accum = use_fp16_accum
+            ctx.groups = groups
             ctx.config_params_for_bwd = {
                 "num_in_coords": in_features.shape[0],
                 "num_out_coords": num_out_coords,
-                "in_channels": in_features.shape[1],
-                "out_channels": weight.shape[2],
-                "kernel_volume": weight.shape[0],
-                "implicit_matmul_fwd_block_size": chosen_fwd_params.get(
-                    "fwd_block_size", fwd_block_size
-                ),
-                "implicit_matmul_bwd_block_size": bwd_block_size,
+                "in_channels": C_in,
+                "out_channels": C_out,
+                "kernel_volume": kv,
                 "compute_dtype": compute_dtype,
                 "device": in_features.device,
-                "initial_dgrad_algo": dgrad_algo,
-                "initial_wgrad_algo": wgrad_algo,
-                "initial_bwd_block_size": bwd_block_size,
+                "dgrad_algo": dgrad_algo,
+                "wgrad_algo": wgrad_algo,
             }
 
         return output_feature_tensor
@@ -273,125 +126,35 @@ class UnifiedSpatiallySparseConvFunction(Function):
         config_params = getattr(ctx, "config_params_for_bwd", None)
         if kernel_map is None or config_params is None or len(ctx.saved_tensors) == 0:
             # Forward ran without grad (e.g., frozen backbone with torch.no_grad())
-            return _pad_tuple(None, None, 11)
+            return _pad_tuple(None, None, 13)
 
         in_features, weight = ctx.saved_tensors
         num_out_coords = config_params["num_out_coords"]
         compute_dtype = config_params["compute_dtype"]
         device = config_params["device"]
-        initial_dgrad_algo = config_params["initial_dgrad_algo"]
-        initial_wgrad_algo = config_params["initial_wgrad_algo"]
+        dgrad_algo = config_params["dgrad_algo"]
+        wgrad_algo = config_params["wgrad_algo"]
+        bwd_params = {}
 
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return _pad_tuple(None, None, 11)
+            return _pad_tuple(None, None, 13)
 
+        use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
         N_in, C_in = in_features.shape
-        K, _, C_out = weight.shape
-        if (
-            num_out_coords == 0
-            or K == 0
-            or C_in == 0
-            or C_out == 0
-            or N_in == 0
-            or grad_output.shape[0] == 0
-        ):
-            grad_in_final = (
-                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            )
-            grad_weight_final = (
-                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            )
-            return _pad_tuple(grad_in_final, grad_weight_final, 11)
+        K = weight.shape[0]
+        C_out = weight.shape[2]
+        if num_out_coords == 0 or K == 0 or C_in == 0 or C_out == 0 or N_in == 0 or grad_output.shape[0] == 0:
+            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            return _pad_tuple(grad_in_final, grad_weight_final, 13)
 
-        # --- Split dgrad/wgrad auto-tuning ---
-        # Each direction is auto-tuned independently so the best algorithm
-        # for dgrad (same structure as forward) can differ from wgrad
-        # (reduction over voxels).
-
-        config_params = ctx.config_params_for_bwd
-        C_in_bwd = config_params["in_channels"]
-        C_out_bwd = config_params["out_channels"]
-        kv_bwd = config_params["kernel_volume"]
-        N_in_bwd = config_params["num_in_coords"]
-        N_out_bwd = config_params["num_out_coords"]
-
-        # Dgrad config: swapped perspective — the AB kernel iterates N_in rows,
-        # gathers from N_out, reduces over C_out, outputs C_in.
-        dgrad_config = SpatiallySparseConvConfig(
-            num_in_coords=N_out_bwd,
-            num_out_coords=N_in_bwd,
-            in_channels=C_out_bwd,
-            out_channels=C_in_bwd,
-            kernel_volume=kv_bwd,
-            in_dtype=grad_output.dtype,
-        )
-        # Wgrad config: reduction over gathered pairs, no swap needed.
-        wgrad_config = SpatiallySparseConvConfig(
-            num_in_coords=N_in_bwd,
-            num_out_coords=N_out_bwd,
-            in_channels=C_in_bwd,
-            out_channels=C_out_bwd,
-            kernel_volume=kv_bwd,
-            in_dtype=grad_output.dtype,
-        )
-
-        def _normalize_algo(algo):
-            if isinstance(algo, list):
-                return [str(a.value) if isinstance(a, Enum) else str(a) for a in algo]
-            if isinstance(algo, Enum):
-                return str(algo.value)
-            return str(algo)
-
-        dgrad_filter = _normalize_algo(initial_dgrad_algo)
-        wgrad_filter = _normalize_algo(initial_wgrad_algo)
-
-        # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
-        if dgrad_filter == "trimmed":
-            dgrad_adaptive = _get_trimmed_AB_params(
-                C_out_bwd,
-                C_in_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-            )
-        else:
-            dgrad_adaptive = _get_adaptive_AB_params(
-                C_out_bwd,
-                C_in_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-            )
-        if wgrad_filter == "trimmed":
-            wgrad_adaptive = _get_trimmed_AtB_params(
-                C_in_bwd,
-                C_out_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-            )
-        else:
-            wgrad_adaptive = _get_adaptive_AtB_params(
-                C_in_bwd,
-                C_out_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-            )
-        filtered_dgrad_params = _filter_benchmark_params_by_env_config(
-            dgrad_adaptive, dgrad_filter, is_forward=True
-        )
-        filtered_wgrad_params = _filter_benchmark_params_by_env_config(
-            wgrad_adaptive, wgrad_filter, is_forward=False
-        )
-
-        # Helper to auto-tune one direction
-        def _autotune_one_direction(
-            cache_dict, cache_ns, needs_grad_tuple, params_for_direction, cfg
-        ):
-            cached = cache_dict.get(cfg)
-            if cached is not None:
-                best_list = [cached] if isinstance(cached, tuple) else cached
-                return best_list[0][0], best_list[0][1]
-            results = _run_backward_benchmarks(
+        if dgrad_algo == wgrad_algo:
+            logger.debug(f"[dispatch] BWD forced algo=explicit_gemm params={{}} " f"N_in={N_in} N_out={num_out_coords} C_in={C_in} C_out={C_out} kv={K}")
+            grad_in_features, grad_weight = _execute_backward(
+                dgrad_algo,
+                bwd_params,
                 grad_output,
                 in_features,
                 weight,
@@ -399,137 +162,20 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 num_out_coords,
                 compute_dtype,
                 device,
-                custom_params=params_for_direction,
-                needs_input_grad=needs_grad_tuple,
+                needs_input_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
+                use_fp16_accum=use_fp16_accum,
             )
-            cache_dict[cfg] = results[0]
-            generic_benchmark_update_entry(
-                cache_ns,
-                cfg,
-                _serialize_benchmark_results(results),
-                force=False,
-            )
-            return results[0][0], results[0][1]
+            if not ctx.needs_input_grad[0]:
+                grad_in_features = None
+            if not ctx.needs_input_grad[1]:
+                grad_weight = None
 
-        # Pre-cast tensors once so dgrad and wgrad don't duplicate work.
-        # The kernel logic functions will detect matching dtype and skip
-        # redundant .to() / .contiguous() / .detach() calls.
-        from warpconvnet.utils.type_cast import _min_dtype
+            ctx.kernel_map = None
+            ctx.config_params_for_bwd = None
 
-        _cast_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
-        _min_dt = _min_dtype(_cast_dtype, weight.dtype)
-        if _min_dt == torch.float64:
-            _min_dt = torch.float32
-        _grad_output = grad_output.contiguous().detach().to(dtype=_min_dt)
-        _in_features = in_features.contiguous().detach().to(dtype=_min_dt)
-        _weight = weight.contiguous().detach().to(dtype=_min_dt)
-
-        # Pre-compute weight transpose once for dgrad (both mask and
-        # cute_grouped need [K, C_out, C_in] contiguous for the AB kernel).
-        _weight_T = (
-            _weight.transpose(1, 2).contiguous() if ctx.needs_input_grad[0] else None
-        )
-
-        # Auto-tune dgrad and wgrad independently
-        grad_in_features = None
-        grad_weight = None
-
-        if ctx.needs_input_grad[0]:
-            dgrad_algo, dgrad_params = _autotune_one_direction(
-                _BENCHMARK_AB_RESULTS,
-                "AB_gather_scatter",
-                (True, False),
-                filtered_dgrad_params,
-                dgrad_config,
-            )
-            logger.debug(
-                f"[dispatch] DGRAD algo={dgrad_algo} params={dgrad_params} "
-                f"N_in={in_features.shape[0]} C_in={in_features.shape[1]} "
-                f"C_out={weight.shape[2]} kv={weight.shape[0]}"
-            )
-            try:
-                grad_in_features, _ = _execute_backward(
-                    dgrad_algo,
-                    dgrad_params,
-                    _grad_output,
-                    _in_features,
-                    _weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
-                    device,
-                    needs_input_grad=(True, False),
-                    weight_T=_weight_T,
-                )
-            except (RuntimeError, Exception) as e:
-                logger.warning(f"DGRAD '{dgrad_algo}' failed: {e}. Falling back.")
-                _BENCHMARK_AB_RESULTS.pop(dgrad_config, None)
-                grad_in_features, _ = _execute_backward(
-                    "explicit_gemm",
-                    {},
-                    _grad_output,
-                    _in_features,
-                    _weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
-                    device,
-                    needs_input_grad=(True, False),
-                    weight_T=_weight_T,
-                )
-
-        if ctx.needs_input_grad[1]:
-            wgrad_algo, wgrad_params = _autotune_one_direction(
-                _BENCHMARK_ATB_RESULTS,
-                "AtB_gather_gather",
-                (False, True),
-                filtered_wgrad_params,
-                wgrad_config,
-            )
-            logger.debug(
-                f"[dispatch] WGRAD algo={wgrad_algo} params={wgrad_params} "
-                f"N_in={in_features.shape[0]} C_in={in_features.shape[1]} "
-                f"C_out={weight.shape[2]} kv={weight.shape[0]}"
-            )
-            try:
-                _, grad_weight = _execute_backward(
-                    wgrad_algo,
-                    wgrad_params,
-                    _grad_output,
-                    _in_features,
-                    _weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
-                    device,
-                    needs_input_grad=(False, True),
-                )
-            except (RuntimeError, Exception) as e:
-                logger.warning(f"WGRAD '{wgrad_algo}' failed: {e}. Falling back.")
-                _BENCHMARK_ATB_RESULTS.pop(wgrad_config, None)
-                _, grad_weight = _execute_backward(
-                    "explicit_gemm",
-                    {},
-                    _grad_output,
-                    _in_features,
-                    _weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
-                    device,
-                    needs_input_grad=(False, True),
-                )
-
-        # Free pre-cast tensors eagerly
-        del _grad_output, _in_features, _weight, _weight_T
-
-        # Release kernel_map GPU tensors (in_maps, out_maps, _pair_table)
-        # eagerly. ctx attributes are not managed by save_for_backward and
-        # can persist until the autograd graph is garbage collected.
-        ctx.kernel_map = None
-        ctx.config_params_for_bwd = None
-
-        return _pad_tuple(grad_in_features, grad_weight, 11)
+            return _pad_tuple(grad_in_features, grad_weight, 13)
+        else:
+            pass
 
 
 # Algorithm execution dispatch moved to dispatch.py
